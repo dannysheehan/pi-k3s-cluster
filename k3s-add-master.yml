@@ -64,31 +64,53 @@
           This playbook is for adding ADDITIONAL masters to an existing cluster.
       when: ansible_limit is defined and groups['masters'][0] in ansible_limit
 
-- name: Validate Cluster Health
-  hosts: "{{ groups['masters'][0] }}"
-  gather_facts: no
+- name: Add Master Node to K3s Cluster
+  hosts: masters
   become: yes
+  serial: 1  # Critical: Add masters one at a time for etcd stability
+  vars:
+    k3s_server_args: >-
+      --data-dir /mnt/ssd/k3s
+      --flannel-backend=none
+      --disable-network-policy
+      --disable-kube-proxy
+      --disable servicelb
+      --disable traefik
   tasks:
-    - name: Check K3s server is running
+    # Skip the first master (it's the existing one)
+    - name: Skip first master
+      meta: end_host
+      when: inventory_hostname == groups['masters'][0]
+
+    # -------------------------------------------------------------------------
+    # Control Plane Validation (delegated so --limit doesn't skip it)
+    # -------------------------------------------------------------------------
+    - name: Check K3s server is running on first master
       command: systemctl is-active k3s
-      register: k3s_status
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
       changed_when: false
       failed_when: k3s_status.rc != 0
+      register: k3s_status
 
     - name: Check K3s API is reachable
       command: kubectl get --raw=/healthz
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: api_health
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
       changed_when: false
       failed_when: api_health.rc != 0
+      register: api_health
 
     - name: Check etcd cluster health
       command: kubectl get --raw=/healthz/etcd
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: etcd_health
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
       changed_when: false
+      register: etcd_health
       failed_when: false
 
     - name: Fail if etcd is unhealthy
@@ -110,6 +132,8 @@
       command: kubectl get nodes -l node-role.kubernetes.io/control-plane=true -o name
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
       register: current_masters
       changed_when: false
 
@@ -125,34 +149,14 @@
           ║  Master Count:   {{ current_masters.stdout_lines | length }}
           ║  Masters:        {{ current_masters.stdout_lines | join(', ') | replace('node/', '') }}
           ╚══════════════════════════════════════════════════════════════════╝
+      run_once: true
 
-    - name: Get server token
+    - name: Get server token from first master
       command: cat /mnt/ssd/k3s/server/node-token
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
       register: server_token_result
       changed_when: false
-
-    - name: Store server token for new masters
-      set_fact:
-        k3s_server_token: "{{ server_token_result.stdout }}"
-        cacheable: yes
-
-- name: Add Master Node to K3s Cluster
-  hosts: masters
-  become: yes
-  serial: 1  # Critical: Add masters one at a time for etcd stability
-  vars:
-    k3s_server_args: >-
-      --data-dir /mnt/ssd/k3s
-      --flannel-backend=none
-      --disable-network-policy
-      --disable-kube-proxy
-      --disable servicelb
-      --disable traefik
-  tasks:
-    # Skip the first master (it's the existing one)
-    - name: Skip first master
-      meta: end_host
-      when: inventory_hostname == groups['masters'][0]
 
     # -------------------------------------------------------------------------
     # Prerequisite Validation
@@ -197,10 +201,13 @@
       changed_when: false
       when: server_service_exists.rc == 0 and 'k3s.service' in server_service_exists.stdout
 
-    - name: Check if node exists as control-plane in cluster
-      command: >
-        kubectl get node {{ inventory_hostname }}
-        -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}'
+    - name: Check if node exists as control-plane in cluster (prefix match)
+      shell: |
+        node=$(kubectl get nodes -o name | grep '^node/{{ inventory_hostname }}\b' | head -1 | sed 's|^node/||')
+        if [ -z "$node" ]; then exit 1; fi
+        role=$(kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}')
+        ready=$(kubectl get node "$node" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+        echo "${node}:${role}:${ready}"
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ groups['masters'][0] }}"
@@ -208,16 +215,23 @@
       failed_when: false
       changed_when: false
 
+    - name: Parse node name and role
+      set_fact:
+        matched_node_name: "{{ node_role.stdout.split(':')[0] }}"
+        matched_node_role: "{{ node_role.stdout.split(':')[1] | default('') }}"
+        matched_node_ready: "{{ node_role.stdout.split(':')[2] | default('') }}"
+      when: node_role.rc == 0
+
     - name: Set already_joined fact
       set_fact:
-        already_joined: "{{ (server_status.rc | default(1)) == 0 and node_role.stdout == 'true' }}"
+        already_joined: "{{ (server_status.rc | default(1)) == 0 and node_role.rc == 0 and (matched_node_role | default('')) == 'true' }}"
 
     - name: Display status for already joined masters
       debug:
         msg: |
-          ✓ Node {{ inventory_hostname }} is already a control-plane node
+          ✓ Node {{ matched_node_name | default(inventory_hostname) }} is already a control-plane node
           ✓ Server status: {{ 'running' if (server_status.rc | default(1)) == 0 else 'not running' }}
-          ✓ Control-plane role: {{ node_role.stdout | default('not set') }}
+          ✓ Control-plane role: {{ matched_node_role | default('not set') }}
           
           Skipping installation - master is healthy.
       when: already_joined
@@ -225,49 +239,37 @@
     # -------------------------------------------------------------------------
     # Clean Up Stale State (if server not running but remnants exist)
     # -------------------------------------------------------------------------
+    - name: Check for stale node in cluster (not Ready)
+      set_fact:
+        stale_node: "{{ node_role.rc == 0 and (matched_node_ready | default('')) != 'True' and not already_joined }}"
+
     - name: Stop stale k3s service
       systemd:
         name: k3s
         state: stopped
       failed_when: false
-      when: not already_joined and server_service_exists.rc == 0
+      when: stale_node and server_service_exists.rc == 0
 
     - name: Remove stale server data
       file:
         path: /mnt/ssd/k3s/server
         state: absent
-      when: not already_joined
+      when: stale_node
 
     - name: Remove stale node password
       file:
         path: /etc/rancher/node
         state: absent
-      when: not already_joined
+      when: stale_node
 
     # -------------------------------------------------------------------------
     # Install K3s Server (Join Existing Cluster)
     # -------------------------------------------------------------------------
-    - name: Get server token from first master
-      set_fact:
-        server_token: "{{ hostvars[groups['masters'][0]]['k3s_server_token'] }}"
-      when: not already_joined
-
-    - name: Display joining message
-      debug:
-        msg: |
-          
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║  Joining {{ inventory_hostname }} to cluster as control-plane    ║
-          ╠══════════════════════════════════════════════════════════════════╣
-          ║  This may take a few minutes while etcd syncs...                 ║
-          ╚══════════════════════════════════════════════════════════════════╝
-      when: not already_joined
-
     - name: Install K3s server (join existing cluster)
       shell: |
         curl -sfL https://get.k3s.io | \
         INSTALL_K3S_VERSION={{ k3s_version }} \
-        K3S_TOKEN={{ server_token }} \
+        K3S_TOKEN={{ server_token_result.stdout }} \
         sh -s - server \
         --server https://{{ master_ip }}:6443 \
         --tls-san {{ hostvars[inventory_hostname]['ansible_host'] }} \
@@ -289,9 +291,10 @@
       when: not already_joined
 
     - name: Wait for node to appear as control-plane
-      command: >
-        kubectl get node {{ inventory_hostname }}
-        -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}'
+      shell: |
+        node=$(kubectl get nodes -o name | grep '^node/{{ inventory_hostname }}\b' | head -1 | sed 's|^node/||')
+        if [ -z "$node" ]; then exit 1; fi
+        kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}'
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ groups['masters'][0] }}"

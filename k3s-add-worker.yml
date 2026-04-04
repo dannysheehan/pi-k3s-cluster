@@ -48,35 +48,32 @@
           ╚══════════════════════════════════════════════════════════════════╝
       when: ansible_limit is not defined
 
-- name: Verify Control Plane is Running
-  hosts: "{{ groups['masters'][0] }}"
-  gather_facts: no
-  become: yes
-  tasks:
-    - name: Check K3s API is reachable
-      command: kubectl get --raw=/healthz
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: api_health
-      changed_when: false
-      failed_when: api_health.rc != 0
-
-    - name: Get node token
-      command: cat /mnt/ssd/k3s/server/node-token
-      register: node_token_result
-      changed_when: false
-
-    - name: Store node token for workers
-      set_fact:
-        k3s_node_token: "{{ node_token_result.stdout }}"
-        cacheable: yes
-
 - name: Add Worker Nodes to K3s Cluster
   hosts: workers
   become: yes
   vars:
     k3s_args: "--data-dir /mnt/ssd/k3s --with-node-id --node-name {{ inventory_hostname }}"
   tasks:
+    # -------------------------------------------------------------------------
+    # Control Plane Validation (delegated so --limit doesn't skip it)
+    # -------------------------------------------------------------------------
+    - name: Check K3s API is reachable
+      command: kubectl get --raw=/healthz
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      changed_when: false
+      failed_when: api_health.rc != 0
+      register: api_health
+
+    - name: Get node token from control plane
+      command: cat /mnt/ssd/k3s/server/node-token
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      register: node_token_result
+      changed_when: false
+
     # -------------------------------------------------------------------------
     # Prerequisite Validation
     # -------------------------------------------------------------------------
@@ -120,14 +117,24 @@
       changed_when: false
       when: agent_service_exists.rc == 0 and 'k3s-agent.service' in agent_service_exists.stdout
 
-    - name: Check if node exists in cluster
-      command: kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+    - name: Check if node exists in cluster (prefix match for --with-node-id)
+      shell: |
+        node=$(kubectl get nodes -o name | grep '^node/{{ inventory_hostname }}\b' | head -1 | sed 's|^node/||')
+        if [ -z "$node" ]; then exit 1; fi
+        ready=$(kubectl get node "$node" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+        echo "${node}:${ready}"
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ groups['masters'][0] }}"
       register: node_ready_status
       failed_when: false
       changed_when: false
+
+    - name: Parse node name and ready status
+      set_fact:
+        matched_node_name: "{{ node_ready_status.stdout.split(':')[0] }}"
+        matched_node_ready: "{{ node_ready_status.stdout.split(':')[1] | default('') }}"
+      when: node_ready_status.rc == 0
 
     - name: Set already_joined fact
       set_fact:
@@ -136,9 +143,9 @@
     - name: Display status for already joined nodes
       debug:
         msg: |
-          ✓ Node {{ inventory_hostname }} is already joined to the cluster
+          ✓ Node {{ matched_node_name | default(inventory_hostname) }} is already joined to the cluster
           ✓ Agent status: {{ 'running' if (agent_status.rc | default(1)) == 0 else 'not running' }}
-          ✓ Node ready: {{ node_ready_status.stdout | default('unknown') }}
+          ✓ Node ready: {{ matched_node_ready | default('unknown') }}
           
           Skipping installation - node is healthy.
       when: already_joined
@@ -148,10 +155,10 @@
     # -------------------------------------------------------------------------
     - name: Check for stale node in cluster (not Ready)
       set_fact:
-        stale_node: "{{ node_ready_status.rc == 0 and node_ready_status.stdout != 'True' and not already_joined }}"
+        stale_node: "{{ node_ready_status.rc == 0 and (matched_node_ready | default('')) != 'True' and not already_joined }}"
 
     - name: Delete stale node from cluster
-      command: kubectl delete node {{ inventory_hostname }}
+      command: kubectl delete node {{ matched_node_name | default(inventory_hostname) }}
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ groups['masters'][0] }}"
@@ -163,34 +170,29 @@
         name: k3s-agent
         state: stopped
       failed_when: false
-      when: not already_joined and agent_service_exists.rc == 0
+      when: stale_node and agent_service_exists.rc == 0
 
     - name: Remove stale node password
       file:
         path: /etc/rancher/node
         state: absent
-      when: not already_joined
+      when: stale_node
 
     - name: Remove stale agent data directory
       file:
         path: /mnt/ssd/k3s/agent
         state: absent
-      when: not already_joined
+      when: stale_node
 
     # -------------------------------------------------------------------------
     # Install K3s Agent
     # -------------------------------------------------------------------------
-    - name: Get node token from control plane
-      set_fact:
-        node_token: "{{ hostvars[groups['masters'][0]]['k3s_node_token'] }}"
-      when: not already_joined
-
     - name: Install K3s agent
       shell: |
         curl -sfL https://get.k3s.io | \
         INSTALL_K3S_VERSION={{ k3s_version }} \
         K3S_URL=https://{{ master_ip }}:6443 \
-        K3S_TOKEN={{ node_token }} \
+        K3S_TOKEN={{ node_token_result.stdout }} \
         K3S_NODE_NAME={{ inventory_hostname }} \
         sh -s - {{ k3s_args }}
       when: not already_joined
@@ -203,19 +205,19 @@
       command: systemctl is-active k3s-agent
       register: agent_active
       until: agent_active.rc == 0
-      retries: 12
-      delay: 5
+      retries: 24
+      delay: 10
       changed_when: false
       when: not already_joined
 
     - name: Wait for node to appear in cluster
-      command: kubectl get node {{ inventory_hostname }}
+      shell: kubectl get nodes -o name | grep -q 'node/{{ inventory_hostname }}'
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ groups['masters'][0] }}"
       register: node_check
       until: node_check.rc == 0
-      retries: 12
+      retries: 30
       delay: 10
       changed_when: false
       when: not already_joined

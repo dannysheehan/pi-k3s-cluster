@@ -63,17 +63,33 @@
           ╚══════════════════════════════════════════════════════════════════╝
       when: ansible_limit is not defined
 
-- name: Validate Quorum Safety
-  hosts: "{{ groups['masters'][0] }}"
-  gather_facts: no
+- name: Remove Master Node from K3s Cluster
+  hosts: masters
   become: yes
+  serial: 1  # Critical: Remove masters one at a time
   vars:
+    drain_timeout: 300
     force_remove: false
+    wipe_data: false
+    skip_drain: false
   tasks:
+    # Skip the first master if it's not being removed
+    - name: Determine if this host should be processed
+      set_fact:
+        should_process: "{{ inventory_hostname in (ansible_limit | default('')) }}"
+
+    - name: Skip hosts not in limit
+      meta: end_host
+      when: not should_process
+
+    # -------------------------------------------------------------------------
+    # Quorum Validation (delegated so --limit doesn't skip it)
+    # -------------------------------------------------------------------------
     - name: Get current master nodes
       command: kubectl get nodes -l node-role.kubernetes.io/control-plane=true -o name
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] if inventory_hostname != groups['masters'][0] else (groups['masters'][1] | default(groups['masters'][0])) }}"
       register: current_masters
       changed_when: false
 
@@ -150,41 +166,25 @@
           ║  Force remove:     {{ force_remove }}
           ╚══════════════════════════════════════════════════════════════════╝
 
-    - name: Store master info for later plays
-      set_fact:
-        cluster_master_count: "{{ master_count }}"
-        cacheable: yes
-
-- name: Remove Master Node from K3s Cluster
-  hosts: masters
-  become: yes
-  serial: 1  # Critical: Remove masters one at a time
-  vars:
-    drain_timeout: 300
-    force_remove: false
-    wipe_data: false
-    skip_drain: false
-  tasks:
-    # Skip the first master if it's not being removed
-    - name: Determine if this host should be processed
-      set_fact:
-        should_process: "{{ inventory_hostname in (ansible_limit | default('')) }}"
-
-    - name: Skip hosts not in limit
-      meta: end_host
-      when: not should_process
-
     # -------------------------------------------------------------------------
     # Pre-removal Checks
     # -------------------------------------------------------------------------
-    - name: Check if node exists in cluster
-      command: kubectl get node {{ inventory_hostname }}
+    - name: Check if node exists in cluster (prefix match for consistency)
+      shell: |
+        node=$(kubectl get nodes -o name | grep '^node/{{ inventory_hostname }}\b' | head -1 | sed 's|^node/||')
+        if [ -z "$node" ]; then exit 1; fi
+        echo "$node"
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ groups['masters'][0] if inventory_hostname != groups['masters'][0] else groups['masters'][1] | default(groups['masters'][0]) }}"
       register: node_exists
       failed_when: false
       changed_when: false
+
+    - name: Set matched node name
+      set_fact:
+        matched_node_name: "{{ node_exists.stdout }}"
+      when: node_exists.rc == 0
 
     - name: Check if k3s service exists
       command: systemctl list-unit-files k3s.service
@@ -217,7 +217,7 @@
     # Cordon and Drain
     # -------------------------------------------------------------------------
     - name: Cordon node (prevent new workloads)
-      command: kubectl cordon {{ inventory_hostname }}
+      command: kubectl cordon {{ matched_node_name | default(inventory_hostname) }}
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ delegate_master }}"
@@ -227,7 +227,7 @@
 
     - name: Drain node workloads
       command: >
-        kubectl drain {{ inventory_hostname }}
+        kubectl drain {{ matched_node_name | default(inventory_hostname) }}
         --ignore-daemonsets
         --delete-emptydir-data
         --timeout={{ drain_timeout }}s
@@ -250,7 +250,7 @@
           --cacert=/var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
           --cert=/var/lib/rancher/k3s/server/tls/etcd/server-client.crt \
           --key=/var/lib/rancher/k3s/server/tls/etcd/server-client.key \
-          member list -w table 2>/dev/null | grep -i "{{ inventory_hostname }}" | awk '{print $2}' | tr -d ','
+          member list -w table 2>/dev/null | grep -i "{{ matched_node_name | default(inventory_hostname) }}" | awk '{print $2}' | tr -d ','
       delegate_to: "{{ delegate_master }}"
       register: etcd_member_id
       failed_when: false
@@ -258,7 +258,7 @@
 
     - name: Display etcd member ID
       debug:
-        msg: "etcd member ID for {{ inventory_hostname }}: {{ etcd_member_id.stdout | default('not found') }}"
+        msg: "etcd member ID for {{ matched_node_name | default(inventory_hostname) }}: {{ etcd_member_id.stdout | default('not found') }}"
 
     - name: Remove etcd member from cluster
       shell: |
@@ -302,7 +302,7 @@
     # Remove Node from Cluster
     # -------------------------------------------------------------------------
     - name: Delete node from cluster
-      command: kubectl delete node {{ inventory_hostname }} --grace-period=60
+      command: kubectl delete node {{ matched_node_name | default(inventory_hostname) }} --grace-period=60
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       delegate_to: "{{ delegate_master }}"

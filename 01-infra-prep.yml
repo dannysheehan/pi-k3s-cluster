@@ -1,0 +1,254 @@
+---
+# ==============================================================================
+# 01-infra-prep.yml - Raspberry Pi Infrastructure Preparation
+# ==============================================================================
+#
+# Purpose:
+#   Prepares Raspberry Pi nodes with the infrastructure requirements for K3s:
+#   - Time synchronization (critical for distributed systems)
+#   - USB SSD setup for fast storage (replaces slow SD cards)
+#   - Storage network configuration (dedicated 10Gbps network for Longhorn)
+#   - cgroups enablement (required for Kubernetes on Raspberry Pi OS)
+#
+# Key Components:
+#   1. Time Sync: Ensures all nodes have synchronized clocks
+#   2. USB SSD: Formats and mounts external USB SSDs at /mnt/ssd
+#      - Used for the full /var tree (/mnt/ssd/var)
+#      - Used for K3s data (/mnt/ssd/k3s)
+#      - Used for Longhorn storage (/mnt/ssd/longhorn)
+#      - Much faster than SD cards for etcd and container I/O
+#   3. Storage Network: Creates br-storage bridge for Longhorn replication
+#      - Uses USB Ethernet adapters (10Gbps)
+#      - Network: 192.168.10.0/24
+#      - Isolates storage traffic from application traffic
+#   4. cgroups: Required for Kubernetes resource management on Raspberry Pi
+#
+# Prerequisites:
+#   - Raspberry Pi OS Lite (64-bit) installed on all nodes
+#   - SSH access configured (key-based authentication)
+#   - USB SSDs connected to all nodes
+#   - USB Ethernet adapters connected for storage network
+#   - Inventory file (hosts.ini) configured with node IPs
+#
+# Post-execution:
+#   - Nodes will reboot if cgroups were not already enabled
+#   - After reboot, nodes are ready for K3s installation (02-k3s-install.yml)
+#   - Verify with: ssh ubuntu@<node-ip> "df -h /mnt/ssd && ip addr show br-storage"
+#
+# ==============================================================================
+
+- name: Prepare Raspberry Pi Nodes
+  hosts: all
+  become: yes
+  vars:
+    # SSD device - can be overridden per host in inventory
+    # Default assumes first USB storage device
+    ssd_device: "{{ ssd_device_override | default('') }}"
+  tasks:
+    # --- OS PREP (time sync first, then K3s prereqs) ---
+    - name: Ensure time synchronization is enabled
+      systemd:
+        name: systemd-timesyncd
+        state: started
+        enabled: yes
+
+    - name: Force time synchronization
+      command: timedatectl set-ntp true
+      changed_when: false
+
+    - name: Wait for time to sync
+      pause:
+        seconds: 3
+
+    - name: Enable cgroups in cmdline.txt (Required for K3s on RPi)
+      replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: '^(.*console=tty1.*)$'
+        replace: '\1 cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1'
+      notify: Reboot
+      # K3s/containerd expect cgroup controllers to be available. On Pi images
+      # this is sometimes missing by default, so we fix it before Kubernetes is installed.
+
+    - name: Install essential packages
+      apt:
+        name:
+          - open-iscsi
+          - nfs-common
+        state: present
+        update_cache: yes
+
+    # linux-modules-extra-raspi is only available on Ubuntu for Raspberry Pi
+    # It provides iscsi_tcp module needed by Longhorn/iSCSI
+    - name: Check if linux-modules-extra-raspi is available
+      command: apt-cache show linux-modules-extra-raspi
+      register: raspi_modules_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install linux-modules-extra-raspi (Ubuntu Raspberry Pi only)
+      apt:
+        name: linux-modules-extra-raspi
+        state: present
+      when: raspi_modules_check.rc == 0
+
+    # For systems without linux-modules-extra-raspi, ensure iscsi_tcp module is available
+    - name: Check if iscsi_tcp module is available
+      command: modprobe -n iscsi_tcp
+      register: iscsi_module_check
+      failed_when: false
+      changed_when: false
+      when: raspi_modules_check.rc != 0
+
+    - name: Warn if iscsi_tcp module is not available
+      debug:
+        msg: "WARNING: iscsi_tcp module not found. Longhorn iSCSI may not work. Consider installing appropriate kernel modules for your distribution."
+      when: raspi_modules_check.rc != 0 and iscsi_module_check.rc != 0
+
+    # --- HYBRID STORAGE SETUP ---
+    # Critical Fix #2: Detect USB SSD dynamically instead of hardcoding /dev/sda1
+    - name: Find USB storage device (skip optical/virtual) if not specified
+      shell: |
+        # Prefer real USB disks (TYPE=disk, TRAN=usb); skip rom/loop
+        usb_disk=$(lsblk -rno NAME,TYPE,TRAN | awk '$3=="usb" && $2=="disk" {print $1; exit}')
+
+        if [ -n "$usb_disk" ]; then
+          # Use first partition if present, otherwise the whole disk
+          usb_part=$(lsblk -rno NAME,TYPE /dev/$usb_disk | awk '$2=="part" {print $1; exit}')
+          if [ -n "$usb_part" ]; then
+            echo "/dev/$usb_part"
+          else
+            echo "/dev/$usb_disk"
+          fi
+          exit 0
+        fi
+
+        # Fallback to the first non-rom, non-loop disk (e.g., /dev/sda1)
+        fallback_disk=$(lsblk -rno NAME,TYPE,TRAN | awk '$2=="disk" && $1!~/^sr/ && $1!~/^loop/ {print $1; exit}')
+        if [ -n "$fallback_disk" ]; then
+          fallback_part=$(lsblk -rno NAME,TYPE /dev/$fallback_disk | awk '$2=="part" {print $1; exit}')
+          if [ -n "$fallback_part" ]; then
+            echo "/dev/$fallback_part"
+          else
+            echo "/dev/$fallback_disk"
+          fi
+        else
+          # Last resort
+          echo "/dev/sda1"
+        fi
+      register: detected_ssd
+      changed_when: false
+      when: ssd_device == ''
+
+    - name: Set SSD device path
+      set_fact:
+        ssd_path: "{{ ssd_device if ssd_device != '' else detected_ssd.stdout | trim }}"
+
+    - name: Display detected SSD device
+      debug:
+        msg: "Using SSD device: {{ ssd_path }}"
+
+    # Critical Fix #3: Check if filesystem already exists before formatting
+    - name: Check if SSD already has a filesystem
+      command: blkid {{ ssd_path }}
+      register: blkid_result
+      failed_when: false
+      changed_when: false
+
+    - name: Format USB SSD (only if no filesystem exists)
+      filesystem:
+        fstype: ext4
+        dev: "{{ ssd_path }}"
+      when: blkid_result.rc != 0
+
+    - name: Mount SSD to /mnt/ssd
+      mount:
+        path: /mnt/ssd
+        src: "{{ ssd_path }}"
+        fstype: ext4
+        opts: defaults,noatime
+        state: mounted
+      # /mnt/ssd becomes the root for high-write paths used later by K3s and Longhorn.
+
+    - name: Create offload directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /mnt/ssd/var
+        - /mnt/ssd/k3s
+        - /mnt/ssd/longhorn
+
+    - name: Stop rsyslog before syncing /var
+      service:
+        name: rsyslog
+        state: stopped
+
+    - name: Sync /var to SSD (first run only)
+      command: rsync -aHAXx --numeric-ids /var/ /mnt/ssd/var/
+      args:
+        creates: /mnt/ssd/var/log
+      # We stage /var on the SSD first, then switch over on reboot using a bind
+      # mount entry in fstab. Reboot-based activation is safer than trying to
+      # live-bind the entire /var tree while services are actively writing to it.
+
+    - name: Remove legacy /var/log bind mount from fstab
+      mount:
+        path: /var/log
+        src: /mnt/ssd/var_log
+        fstype: none
+        opts: bind
+        state: absent_from_fstab
+      notify: Reboot
+
+    - name: Configure /var bind mount from SSD
+      mount:
+        path: /var
+        src: /mnt/ssd/var
+        opts: bind
+        state: present
+        fstype: none
+      notify: Reboot
+
+    - name: Start rsyslog
+      service:
+        name: rsyslog
+        state: started
+
+    # --- NETWORK PREP (BRIDGE METHOD) ---
+    - name: Configure Netplan with Bridge for Storage
+      copy:
+        dest: /etc/netplan/60-storage.yaml
+        content: |
+          network:
+            version: 2
+            ethernets:
+              # We define the USB adapter by matching its MAC address
+              # We do NOT rename it, we just enable it for the bridge
+              usb-adapter:
+                match:
+                  macaddress: {{ storage_mac }}
+                dhcp4: false
+                optional: true
+
+            bridges:
+              # We create a standard bridge name that will be the same on ALL nodes
+              br-storage:
+                interfaces: [usb-adapter]
+                addresses:
+                  - {{ storage_ip }}/24
+                parameters:
+                  stp: false
+                  forward-delay: 0
+                dhcp4: false
+        mode: '0600'
+      notify: Apply Netplan
+      # Standardising on br-storage keeps later add-ons simple:
+      # Multus, Whereabouts, and Longhorn can all refer to the same interface name
+      # instead of handling per-node USB NIC naming differences.
+
+  handlers:
+    - name: Apply Netplan
+      command: netplan apply
+    - name: Reboot
+      reboot:

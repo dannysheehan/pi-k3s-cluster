@@ -1,0 +1,711 @@
+---
+# ============================================================================
+# Raspberry Pi K3s Cluster - Victoria Metrics Monitoring Stack
+# ============================================================================
+#
+# This playbook installs a lightweight monitoring stack using Victoria Metrics
+# instead of kube-prometheus-stack. Victoria Metrics is ideal for Raspberry Pi
+# clusters because:
+# - No CRDs required (avoids API server stress)
+# - 3x less memory usage than Prometheus
+# - 100% PromQL compatible (same dashboards work)
+# - Better compression (7x less disk space)
+#
+# Components installed:
+# 1. Victoria Metrics Single (time-series database)
+# 2. VMAgent (metrics scraper)
+# 3. Grafana (dashboards)
+# 4. Node Exporter (host metrics)
+#
+# Prerequisites:
+# - K3s cluster with add-ons installed (03-addons.yml completed)
+# - Longhorn storage available for persistent volumes
+# - Traefik ingress controller running
+# - kubeconfig available at ~/.kube/config-rpi
+#
+# Access after deployment:
+# - Grafana: http://192.168.1.200/grafana (admin / admin)
+# - Victoria Metrics: kubectl port-forward -n monitoring svc/vmsingle 8428:8428
+#
+# ============================================================================
+
+- name: Install Victoria Metrics Monitoring Stack
+  hosts: localhost
+  connection: local
+  vars:
+    kubeconfig: ~/.kube/config-rpi
+  tasks:
+    # ========================================================================
+    # PREREQUISITES CHECK
+    # ========================================================================
+    - name: Verify Longhorn is available
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: StorageClass
+        name: longhorn
+      register: longhorn_sc
+      failed_when: longhorn_sc.resources | length == 0
+      retries: 5
+      delay: 10
+      until: longhorn_sc.resources | length > 0
+      tags: [monitoring, prerequisites]
+
+    - name: Verify Traefik is running
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: traefik
+        name: traefik
+      register: traefik_deploy
+      failed_when: traefik_deploy.resources | length == 0
+      retries: 5
+      delay: 10
+      until: traefik_deploy.resources | length > 0
+      tags: [monitoring, prerequisites]
+
+    # ========================================================================
+    # NAMESPACE CREATION
+    # ========================================================================
+    - name: Create monitoring namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: monitoring
+            labels:
+              name: monitoring
+      tags: [monitoring]
+
+    # ========================================================================
+    # UPDATE TRAEFIK TO ENABLE PROMETHEUS METRICS
+    # ========================================================================
+    - name: Update Traefik to enable Prometheus metrics
+      kubernetes.core.helm:
+        name: traefik
+        chart_ref: traefik/traefik
+        chart_version: "30.1.0"
+        release_namespace: traefik
+        kubeconfig: "{{ kubeconfig }}"
+        values:
+          service:
+            type: LoadBalancer
+          providers:
+            kubernetesIngress:
+              enabled: true
+              publishedService:
+                enabled: true
+            kubernetesGateway:
+              enabled: true
+          gatewayClass:
+            enabled: true
+            name: traefik
+          ingressRoute:
+            dashboard:
+              enabled: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          logs:
+            access:
+              enabled: true
+          # Prometheus metrics
+          metrics:
+            prometheus:
+              enabled: true
+              entryPoint: metrics
+              addEntryPointsLabels: true
+              addRoutersLabels: true
+              addServicesLabels: true
+          ports:
+            metrics:
+              port: "{{ traefik_metrics_port }}"
+              expose:
+                default: true
+              exposedPort: "{{ traefik_metrics_port }}"
+              protocol: TCP
+      tags: [monitoring, traefik_metrics]
+
+    # ========================================================================
+    # HELM REPOSITORIES
+    # ========================================================================
+    - name: Add Victoria Metrics Helm Repo
+      kubernetes.core.helm_repository:
+        name: vm
+        repo_url: "https://victoriametrics.github.io/helm-charts/"
+      tags: [monitoring, repositories]
+
+    - name: Add Grafana Helm Repo
+      kubernetes.core.helm_repository:
+        name: grafana
+        repo_url: "https://grafana.github.io/helm-charts"
+      tags: [monitoring, repositories]
+
+    - name: Add Prometheus Community Helm Repo (for node-exporter)
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: "https://prometheus-community.github.io/helm-charts"
+      tags: [monitoring, repositories]
+
+    # ========================================================================
+    # NODE EXPORTER - Host metrics
+    # ========================================================================
+    - name: Install Node Exporter
+      kubernetes.core.helm:
+        name: node-exporter
+        chart_ref: prometheus-community/prometheus-node-exporter
+        chart_version: "{{ node_exporter_chart_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        values:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      tags: [monitoring, node_exporter]
+
+    # ========================================================================
+    # VICTORIA METRICS SINGLE - Time-series database
+    # ========================================================================
+    - name: Install Victoria Metrics Single
+      kubernetes.core.helm:
+        name: vmsingle
+        chart_ref: vm/victoria-metrics-single
+        chart_version: "{{ victoria_metrics_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 300s
+        values:
+          server:
+            retentionPeriod: "{{ vm_retention }}"
+            persistentVolume:
+              enabled: true
+              storageClass: "{{ storage_class }}"
+              size: "{{ vm_storage_size }}"
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+            # Optimisations for Raspberry Pi
+            extraArgs:
+              dedup.minScrapeInterval: 30s
+              search.maxConcurrentRequests: 2
+              search.maxQueueDuration: 30s
+      tags: [monitoring, vmsingle]
+
+    # ========================================================================
+    # VMAGENT - Metrics scraper
+    # ========================================================================
+    - name: Install VMAgent
+      kubernetes.core.helm:
+        name: vmagent
+        chart_ref: vm/victoria-metrics-agent
+        chart_version: "{{ vmagent_chart_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 300s
+        values:
+          mode: deployment
+          # Remote write configuration - required by the chart
+          remoteWrite:
+            - url: "http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428/api/v1/write"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 200m
+              memory: 512Mi
+          extraArgs:
+            promscrape.streamParse: "{{ vmagent_stream_parse }}"
+            promscrape.discovery.concurrency: "{{ vmagent_discovery_concurrency }}"
+          # Scrape configurations
+          # Keep these jobs conservative and explicit. On small Pi nodes, broad
+          # auto-discovery can create duplicate targets and memory spikes.
+          config:
+            global:
+              scrape_interval: "{{ vmagent_scrape_interval }}"
+              scrape_timeout: "{{ vmagent_scrape_timeout }}"
+            scrape_configs:
+              # Kubernetes API Server
+              - job_name: kubernetes-apiservers
+                kubernetes_sd_configs:
+                  - role: endpoints
+                scheme: https
+                tls_config:
+                  ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  insecure_skip_verify: true
+                bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+                    action: keep
+                    regex: default;kubernetes;https
+
+              # Kubelet metrics
+              - job_name: kubelet
+                kubernetes_sd_configs:
+                  - role: node
+                scheme: https
+                tls_config:
+                  ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  insecure_skip_verify: true
+                bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+                relabel_configs:
+                  - action: labelmap
+                    regex: __meta_kubernetes_node_label_(.+)
+                  - target_label: __address__
+                    replacement: kubernetes.default.svc:443
+                  - source_labels: [__meta_kubernetes_node_name]
+                    target_label: __metrics_path__
+                    replacement: /api/v1/nodes/$1/proxy/metrics
+
+              # cAdvisor (container metrics from kubelet)
+              - job_name: cadvisor
+                kubernetes_sd_configs:
+                  - role: node
+                scheme: https
+                tls_config:
+                  ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  insecure_skip_verify: true
+                bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+                metrics_path: /metrics/cadvisor
+                relabel_configs:
+                  - action: labelmap
+                    regex: __meta_kubernetes_node_label_(.+)
+                  - target_label: __address__
+                    replacement: kubernetes.default.svc:443
+                  - source_labels: [__meta_kubernetes_node_name]
+                    target_label: __metrics_path__
+                    replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+              # Node Exporter
+              - job_name: node-exporter
+                kubernetes_sd_configs:
+                  - role: pod
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+                    regex: prometheus-node-exporter
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_ip]
+                    target_label: __address__
+                    replacement: ${1}:9100
+
+              # Longhorn
+              - job_name: longhorn
+                static_configs:
+                  - targets:
+                      - longhorn-backend.longhorn-system.svc:9500
+                relabel_configs:
+                  - source_labels: [__address__]
+                    target_label: instance
+                    replacement: longhorn
+
+              # Traefik
+              # Discover Traefik via service endpoints rather than a hardcoded
+              # static target so the scrape survives pod reschedules.
+              - job_name: traefik
+                kubernetes_sd_configs:
+                  - role: endpoints
+                    namespaces:
+                      names:
+                        - traefik
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+                    regex: traefik;metrics
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_node_name]
+                    target_label: instance
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+
+              # Cilium Agent metrics (port 9962)
+              # Scrape cilium pods directly to avoid depending on service
+              # annotations. Restrict to the named prometheus port, otherwise
+              # vmagent may discover multiple pod ports and create duplicates.
+              - job_name: cilium-agent
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names:
+                        - kube-system
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_k8s_app]
+                    regex: cilium
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_container_name]
+                    regex: cilium-agent
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_container_port_name]
+                    regex: prometheus
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_phase]
+                    regex: Running
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_ip]
+                    target_label: __address__
+                    replacement: ${1}:9962
+                  - source_labels: [__meta_kubernetes_pod_name]
+                    target_label: pod
+                  - source_labels: [__meta_kubernetes_pod_node_name]
+                    target_label: node
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+
+              # Hubble metrics (port 9965)
+              # Hubble metrics are exposed by the same cilium pods on port 9965.
+              # As above, keep the port filter strict to avoid duplicate-target
+              # warnings in vmagent logs.
+              - job_name: hubble
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names:
+                        - kube-system
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_k8s_app]
+                    regex: cilium
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_container_name]
+                    regex: cilium-agent
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_container_port_name]
+                    regex: hubble-metrics
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_phase]
+                    regex: Running
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_ip]
+                    target_label: __address__
+                    replacement: ${1}:9965
+                  - source_labels: [__meta_kubernetes_pod_name]
+                    target_label: pod
+                  - source_labels: [__meta_kubernetes_pod_node_name]
+                    target_label: node
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+
+              # Kube State Metrics (if installed)
+              - job_name: kube-state-metrics
+                kubernetes_sd_configs:
+                  - role: service
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+                    regex: kube-state-metrics
+                    action: keep
+      tags: [monitoring, vmagent]
+
+    - name: Wait for VMAgent deployment to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: monitoring
+        name: vmagent-victoria-metrics-agent
+      register: vmagent_deploy
+      until: >
+        vmagent_deploy.resources is defined and
+        vmagent_deploy.resources | length > 0 and
+        (vmagent_deploy.resources[0].status.readyReplicas | default(0)) ==
+        (vmagent_deploy.resources[0].status.replicas | default(1))
+      retries: 30
+      delay: 10
+      failed_when: false
+      tags: [monitoring, vmagent]
+
+    - name: Get VMAgent pods for diagnostics
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        namespace: monitoring
+        label_selectors:
+          - app.kubernetes.io/instance=vmagent
+      register: vmagent_pods
+      when: >
+        vmagent_deploy.resources | default([]) | length == 0 or
+        (vmagent_deploy.resources[0].status.readyReplicas | default(0)) !=
+        (vmagent_deploy.resources[0].status.replicas | default(1))
+      tags: [monitoring, vmagent]
+
+    - name: Get VMAgent pods for verification
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        namespace: monitoring
+        label_selectors:
+          - app.kubernetes.io/instance=vmagent
+      register: vmagent_pods_ready
+      changed_when: false
+      tags: [monitoring, verification]
+
+    # The smoke test is intentionally lightweight: it proves that series exist
+    # in VictoriaMetrics without coupling success to a specific Grafana dashboard.
+    - name: Fail with VMAgent rollout diagnostics
+      fail:
+        msg: >-
+          VMAgent deployment did not become ready. Pod phases:
+          {{ vmagent_pods.resources | default([]) | map(attribute='status.phase') | list }}.
+          Check `kubectl describe deployment/vmagent-victoria-metrics-agent -n monitoring`
+          and `kubectl logs -n monitoring -l app.kubernetes.io/instance=vmagent`.
+      when: >
+        vmagent_deploy.resources | default([]) | length == 0 or
+        (vmagent_deploy.resources[0].status.readyReplicas | default(0)) !=
+        (vmagent_deploy.resources[0].status.replicas | default(1))
+      tags: [monitoring, vmagent]
+
+    # ========================================================================
+    # GRAFANA - Dashboards
+    # ========================================================================
+    - name: Install Grafana
+      kubernetes.core.helm:
+        name: grafana
+        chart_ref: grafana/grafana
+        chart_version: "{{ grafana_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 300s
+        values:
+          # Single replica for RPi — avoids unnecessary resource use and
+          # Multi-Attach PVC errors with ReadWriteOnce volumes.
+          replicas: 1
+          # Grafana uses a single Longhorn ReadWriteOnce PVC. Recreate avoids
+          # rollout overlap where a new pod starts before the old pod releases
+          # the volume, which otherwise triggers Multi-Attach errors.
+          deploymentStrategy:
+            type: Recreate
+          adminPassword: "{{ grafana_admin_password }}"
+          persistence:
+            enabled: true
+            storageClassName: "{{ storage_class }}"
+            size: "{{ grafana_storage_size }}"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          # Configure for sub-path access
+          grafana.ini:
+            server:
+              root_url: "{{ grafana_root_url }}"
+              serve_from_sub_path: true
+            auth.anonymous:
+              enabled: false
+          # Victoria Metrics as datasource
+          datasources:
+            datasources.yaml:
+              apiVersion: 1
+              datasources:
+                - name: VictoriaMetrics
+                  type: prometheus
+                  url: http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428
+                  access: proxy
+                  isDefault: true
+          # Dashboard providers
+          dashboardProviders:
+            dashboardproviders.yaml:
+              apiVersion: 1
+              providers:
+                - name: default
+                  orgId: 1
+                  folder: ''
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/default
+                - name: infrastructure
+                  orgId: 1
+                  folder: 'Infrastructure'
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/infrastructure
+          # Pre-provision community dashboards
+          dashboards:
+            default:
+              # Node Exporter Full
+              node-exporter-full:
+                gnetId: 1860
+                revision: 37
+                datasource: VictoriaMetrics
+              # Kubernetes Cluster Overview
+              k8s-cluster:
+                gnetId: 7249
+                revision: 1
+                datasource: VictoriaMetrics
+            infrastructure:
+              # Longhorn
+              longhorn:
+                gnetId: 16888
+                revision: 9
+                datasource: VictoriaMetrics
+              # Traefik
+              traefik:
+                gnetId: 17346
+                revision: 9
+                datasource: VictoriaMetrics
+              # Hubble
+              hubble:
+                gnetId: 16612
+                revision: 1
+                datasource: VictoriaMetrics
+          sidecar:
+            dashboards:
+              enabled: true
+              searchNamespace: ALL
+            datasources:
+              enabled: true
+      tags: [monitoring, grafana]
+
+    # ========================================================================
+    # TRAEFIK INGRESSROUTE FOR GRAFANA ACCESS
+    # ========================================================================
+    # Note: No StripPrefix middleware needed because Grafana is configured with
+    # serve_from_sub_path = true and root_url = http://192.168.1.200/grafana
+    - name: Create Grafana IngressRoute
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: grafana
+            namespace: monitoring
+          spec:
+            entryPoints:
+              - web
+            routes:
+              - match: PathPrefix(`/grafana`)
+                kind: Rule
+                services:
+                  - name: grafana
+                    port: 80
+      tags: [monitoring, grafana]
+
+    - name: Create custom Cilium dashboard ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        # Use a standalone manifest file here rather than embedding a large JSON
+        # object in this playbook. It avoids YAML/templating edge cases and makes
+        # future dashboard edits easier to review.
+        src: "{{ playbook_dir }}/dashboards/cilium-overview-configmap.yaml"
+      tags: [monitoring, grafana]
+
+    # ========================================================================
+    # VERIFICATION
+    # ========================================================================
+    # Note: Victoria Metrics Single uses a StatefulSet, not a Deployment
+    - name: Wait for Victoria Metrics to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: StatefulSet
+        namespace: monitoring
+        name: vmsingle-victoria-metrics-single-server
+      register: vm_sts
+      until: >
+        vm_sts.resources is defined and
+        vm_sts.resources | length > 0 and
+        (vm_sts.resources[0].status.readyReplicas | default(0)) ==
+        (vm_sts.resources[0].status.replicas | default(1))
+      retries: 30
+      delay: 10
+      ignore_errors: true
+      tags: [monitoring, verification]
+
+    - name: Query Victoria Metrics for expected scrape series
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: monitoring
+        pod: "{{ vmagent_pod_name }}"
+        command: >-
+          sh -c "wget -qO- http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428/api/v1/series?match[]={{ item }}"
+      vars:
+        vmagent_pod_name: "{{ vmagent_pods_ready.resources[0].metadata.name }}"
+      register: monitoring_smoke_tests
+      changed_when: false
+      failed_when: false
+      loop: "{{ monitoring_smoke_test_metric_names }}"
+      when:
+        - vmagent_pods_ready.resources | default([]) | length > 0
+      tags: [monitoring, verification]
+
+    - name: Report missing monitoring series
+      ansible.builtin.debug:
+        msg: >-
+          Monitoring smoke test for {{ item.item }} returned no series yet.
+          This can be normal immediately after deployment, but if it persists
+          check vmagent targets and the exporter endpoint directly.
+      loop: "{{ monitoring_smoke_tests.results | default([]) }}"
+      when:
+        - item.stdout is defined
+        - item.stdout is search('"data":\\[\\]')
+      tags: [monitoring, verification]
+
+    - name: Wait for Grafana to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: monitoring
+        name: grafana
+      register: grafana_deploy
+      until: >
+        grafana_deploy.resources is defined and
+        grafana_deploy.resources | length > 0 and
+        (grafana_deploy.resources[0].status.readyReplicas | default(0)) ==
+        (grafana_deploy.resources[0].status.replicas | default(1))
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: Display monitoring stack status
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          VICTORIA METRICS MONITORING STACK DEPLOYED SUCCESSFULLY
+          ============================================================
+          
+          Grafana:
+            URL: http://192.168.1.200/grafana
+            Username: admin
+            Password: {{ grafana_admin_password }}
+          
+          Victoria Metrics (port-forward):
+            kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
+            Then access: http://localhost:8428
+          
+          Pre-installed Dashboards:
+            - Node Exporter Full (ID: 1860)
+            - Kubernetes Cluster Overview (ID: 7249)
+            - Longhorn (ID: 16888)
+            - Traefik (ID: 17346)
+            - Cilium Agent (ID: 16611)
+            - Hubble (ID: 16612)
+          
+          Storage:
+            - Victoria Metrics: {{ vm_storage_size }} ({{ vm_retention }} retention)
+            - Grafana: {{ grafana_storage_size }}
+          
+          Resource Usage (Total):
+            - CPU Requests: ~400m
+            - Memory Requests: ~480Mi
+            - Much lighter than kube-prometheus-stack!
+          ============================================================

@@ -1,0 +1,73 @@
+# Python virtual environment
+.venv/
+venv/
+ENV/
+
+# Ansible collections (installed locally via requirements.yml)
+collections/
+
+# Ansible roles (if installed locally)
+roles/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+plans/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Kubeconfig files (may contain secrets)
+*.kubeconfig
+config-rpi
+
+# Ansible retry files
+*.retry
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Secrets and credentials (never commit these)
+*.pem
+*.key
+secrets/
+credentials/

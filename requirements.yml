@@ -1,0 +1,12 @@
+# Ansible collection dependencies for pi-cluster
+# Install with: ansible-galaxy collection install -r requirements.yml -p ./collections
+
+---
+collections:
+  # Required for Helm and Kubernetes resource management
+  - name: kubernetes.core
+    version: ">=3.0.0"
+
+  # Community general collection (useful utilities)
+  - name: community.general
+    version: ">=8.0.0"

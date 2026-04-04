@@ -1,0 +1,375 @@
+---
+# ============================================================================
+# k3s-remove-master.yml - Remove Master Nodes from K3s HA Cluster
+# ============================================================================
+#
+# USAGE: ansible-playbook k3s-remove-master.yml --limit <node-name>
+#
+# This playbook safely removes control plane nodes from a K3s HA cluster.
+# The --limit flag is REQUIRED. Includes quorum protection.
+#
+# Examples:
+#   # Remove a master (keeps data for potential rejoin)
+#   ansible-playbook k3s-remove-master.yml --limit k3s-ctl-03
+#
+#   # Remove and wipe all K3s data (for decommissioning)
+#   ansible-playbook k3s-remove-master.yml --limit k3s-ctl-03 -e wipe_data=true
+#
+#   # Force removal of unresponsive master
+#   ansible-playbook k3s-remove-master.yml --limit k3s-ctl-03 -e force_remove=true
+#
+# Options:
+#   -e wipe_data=true     Remove all K3s data from the node
+#   -e drain_timeout=300  Timeout for draining workloads (default: 300s)
+#   -e force_remove=true  Force removal even if node is unresponsive
+#   -e skip_drain=true    Skip drain entirely (for already-drained nodes)
+#
+# Safety Features:
+#   - Requires --limit flag (fails without it)
+#   - Cannot remove the LAST master (would destroy cluster)
+#   - Validates quorum will be maintained
+#   - Removes etcd member BEFORE stopping K3s
+#   - Serial execution (one master at a time)
+#
+# Quorum Rules:
+#   - 1 master: Cannot remove (would destroy cluster)
+#   - 2 masters: Can remove (loses HA, warns user)
+#   - 3 masters: Can remove (maintains quorum with 2)
+#   - 5 masters: Can remove (maintains quorum with 4)
+#
+# ============================================================================
+
+- name: Validate Execution Parameters
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Fail if no --limit specified
+      fail:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ERROR: You must specify --limit to target specific nodes        ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  This playbook requires explicit node targeting to prevent       ║
+          ║  accidental removal of masters.                                  ║
+          ║                                                                  ║
+          ║  Usage:                                                          ║
+          ║    ansible-playbook k3s-remove-master.yml --limit k3s-ctl-03     ║
+          ║                                                                  ║
+          ║  Options:                                                        ║
+          ║    -e wipe_data=true     Wipe K3s data after removal             ║
+          ║    -e force_remove=true  Force removal of unresponsive node      ║
+          ║    -e drain_timeout=300  Drain timeout in seconds                ║
+          ╚══════════════════════════════════════════════════════════════════╝
+      when: ansible_limit is not defined
+
+- name: Validate Quorum Safety
+  hosts: "{{ groups['masters'][0] }}"
+  gather_facts: no
+  become: yes
+  vars:
+    force_remove: false
+  tasks:
+    - name: Get current master nodes
+      command: kubectl get nodes -l node-role.kubernetes.io/control-plane=true -o name
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: current_masters
+      changed_when: false
+
+    - name: Calculate cluster state
+      set_fact:
+        master_count: "{{ current_masters.stdout_lines | length }}"
+        target_nodes: "{{ ansible_limit.split(',') if ansible_limit is defined else [] }}"
+
+    - name: Calculate masters remaining after requested removal
+      set_fact:
+        limited_masters: "{{ target_nodes | intersect(groups['masters']) }}"
+        remaining_after: "{{ master_count | int - (limited_masters | length) }}"
+
+    - name: Check if trying to remove first/only master
+      set_fact:
+        removing_first_master: "{{ groups['masters'][0] in (ansible_limit | default('')) }}"
+
+    - name: Fail if trying to remove last master
+      fail:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ERROR: Cannot remove the last master node!                      ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Current masters: {{ master_count }}
+          ║  Remaining after: {{ remaining_after }}
+          ║                                                                  ║
+          ║  Removing the last master would destroy the cluster.             ║
+          ║  If you want to decommission the entire cluster, use:            ║
+          ║    k3s-uninstall.sh on each node manually                        ║
+          ╚══════════════════════════════════════════════════════════════════╝
+      when: remaining_after | int < 1
+
+    - name: Warn if removing will lose HA
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ⚠️  WARNING: Removing this master will reduce HA capability     ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Current masters: {{ master_count }}
+          ║  Remaining after: {{ remaining_after }}
+          ║                                                                  ║
+          ║  HA requires at least 2 masters (3 recommended for quorum).      ║
+          ║  Proceeding will leave you with reduced fault tolerance.         ║
+          ╚══════════════════════════════════════════════════════════════════╝
+      when: remaining_after | int < 2
+
+    - name: Warn if removing first master
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ⚠️  WARNING: Removing the first/primary master                  ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  You are removing {{ groups['masters'][0] }} which was the       ║
+          ║  original cluster initialiser.                                   ║
+          ║                                                                  ║
+          ║  This is supported but ensure other masters are healthy first.   ║
+          ║  After removal, update hosts.ini to reflect the new primary.     ║
+          ╚══════════════════════════════════════════════════════════════════╝
+      when: removing_first_master
+
+    - name: Display removal plan
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  Master Removal Plan                                             ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Current masters:  {{ master_count }}
+          ║  Removing:         {{ ansible_limit }}
+          ║  Remaining after:  {{ remaining_after }}
+          ║  Force remove:     {{ force_remove }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Store master info for later plays
+      set_fact:
+        cluster_master_count: "{{ master_count }}"
+        cacheable: yes
+
+- name: Remove Master Node from K3s Cluster
+  hosts: masters
+  become: yes
+  serial: 1  # Critical: Remove masters one at a time
+  vars:
+    drain_timeout: 300
+    force_remove: false
+    wipe_data: false
+    skip_drain: false
+  tasks:
+    # Skip the first master if it's not being removed
+    - name: Determine if this host should be processed
+      set_fact:
+        should_process: "{{ inventory_hostname in (ansible_limit | default('')) }}"
+
+    - name: Skip hosts not in limit
+      meta: end_host
+      when: not should_process
+
+    # -------------------------------------------------------------------------
+    # Pre-removal Checks
+    # -------------------------------------------------------------------------
+    - name: Check if node exists in cluster
+      command: kubectl get node {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] if inventory_hostname != groups['masters'][0] else groups['masters'][1] | default(groups['masters'][0]) }}"
+      register: node_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Check if k3s service exists
+      command: systemctl list-unit-files k3s.service
+      register: server_service_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Set node state facts
+      set_fact:
+        node_in_cluster: "{{ node_exists.rc == 0 }}"
+        server_installed: "{{ server_service_exists.rc == 0 and 'k3s.service' in server_service_exists.stdout }}"
+        delegate_master: "{{ groups['masters'][0] if inventory_hostname != groups['masters'][0] else (groups['masters'][1] | default(groups['masters'][0])) }}"
+
+    - name: Display removal status
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  Removing {{ inventory_hostname }} from cluster                  ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Node in cluster:   {{ 'Yes' if node_in_cluster else 'No' }}
+          ║  Server installed:  {{ 'Yes' if server_installed else 'No' }}
+          ║  Delegate master:   {{ delegate_master }}
+          ║  Drain timeout:     {{ drain_timeout }}s
+          ║  Force remove:      {{ force_remove }}
+          ║  Wipe data:         {{ wipe_data }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    # -------------------------------------------------------------------------
+    # Cordon and Drain
+    # -------------------------------------------------------------------------
+    - name: Cordon node (prevent new workloads)
+      command: kubectl cordon {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ delegate_master }}"
+      when: node_in_cluster and not skip_drain
+      failed_when: false
+      changed_when: true
+
+    - name: Drain node workloads
+      command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --timeout={{ drain_timeout }}s
+        {{ '--force' if force_remove else '' }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ delegate_master }}"
+      when: node_in_cluster and not skip_drain
+      register: drain_result
+      failed_when: false
+      changed_when: drain_result.rc == 0
+
+    # -------------------------------------------------------------------------
+    # Remove etcd Member (BEFORE stopping K3s)
+    # -------------------------------------------------------------------------
+    - name: Get etcd member ID
+      shell: |
+        ETCDCTL_API=3 /var/lib/rancher/k3s/data/current/bin/etcdctl \
+          --endpoints=https://127.0.0.1:2379 \
+          --cacert=/var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
+          --cert=/var/lib/rancher/k3s/server/tls/etcd/server-client.crt \
+          --key=/var/lib/rancher/k3s/server/tls/etcd/server-client.key \
+          member list -w table 2>/dev/null | grep -i "{{ inventory_hostname }}" | awk '{print $2}' | tr -d ','
+      delegate_to: "{{ delegate_master }}"
+      register: etcd_member_id
+      failed_when: false
+      changed_when: false
+
+    - name: Display etcd member ID
+      debug:
+        msg: "etcd member ID for {{ inventory_hostname }}: {{ etcd_member_id.stdout | default('not found') }}"
+
+    - name: Remove etcd member from cluster
+      shell: |
+        ETCDCTL_API=3 /var/lib/rancher/k3s/data/current/bin/etcdctl \
+          --endpoints=https://127.0.0.1:2379 \
+          --cacert=/var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
+          --cert=/var/lib/rancher/k3s/server/tls/etcd/server-client.crt \
+          --key=/var/lib/rancher/k3s/server/tls/etcd/server-client.key \
+          member remove {{ etcd_member_id.stdout }}
+      delegate_to: "{{ delegate_master }}"
+      when: etcd_member_id.stdout | default('') | length > 0
+      register: etcd_remove_result
+      failed_when: false
+      changed_when: etcd_remove_result.rc == 0
+
+    - name: etcd removal status
+      debug:
+        msg: "{{ '✓ etcd member removed' if (etcd_remove_result.rc | default(1)) == 0 else '⚠️ etcd member removal skipped or failed' }}"
+
+    # -------------------------------------------------------------------------
+    # Stop and Uninstall K3s Server
+    # -------------------------------------------------------------------------
+    - name: Stop k3s service
+      systemd:
+        name: k3s
+        state: stopped
+      when: server_installed
+      failed_when: false
+
+    - name: Check for k3s-uninstall script
+      stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: uninstall_script
+
+    - name: Uninstall K3s server
+      command: /usr/local/bin/k3s-uninstall.sh
+      when: uninstall_script.stat.exists
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # Remove Node from Cluster
+    # -------------------------------------------------------------------------
+    - name: Delete node from cluster
+      command: kubectl delete node {{ inventory_hostname }} --grace-period=60
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ delegate_master }}"
+      when: node_in_cluster
+      register: delete_result
+      failed_when: false
+      changed_when: delete_result.rc == 0
+
+    # -------------------------------------------------------------------------
+    # Optional: Wipe K3s Data
+    # -------------------------------------------------------------------------
+    - name: Remove K3s data directory
+      file:
+        path: /mnt/ssd/k3s
+        state: absent
+      when: wipe_data | bool
+
+    - name: Remove K3s configuration directory
+      file:
+        path: /etc/rancher
+        state: absent
+      when: wipe_data | bool
+
+    # -------------------------------------------------------------------------
+    # Verify Cluster Health After Removal
+    # -------------------------------------------------------------------------
+    - name: Wait for etcd to stabilise
+      command: kubectl get --raw=/healthz/etcd
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ delegate_master }}"
+      register: etcd_health
+      until: etcd_health.rc == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Get remaining masters
+      command: kubectl get nodes -l node-role.kubernetes.io/control-plane=true -o name
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ delegate_master }}"
+      register: remaining_masters
+      changed_when: false
+      failed_when: false
+
+    - name: Display completion message
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ✓ Successfully removed {{ inventory_hostname }}                 ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Node has been:                                                  ║
+          ║    {{ '✓' if node_in_cluster else '○' }} Cordoned and drained
+          ║    {{ '✓' if (etcd_remove_result.rc | default(1)) == 0 else '○' }} etcd member removed
+          ║    {{ '✓' if server_installed else '○' }} K3s server uninstalled
+          ║    {{ '✓' if node_in_cluster else '○' }} Removed from cluster
+          ║    {{ '✓' if wipe_data else '○' }} Data wiped
+          ║                                                                  ║
+          ║  Remaining masters: {{ remaining_masters.stdout_lines | length | default(0) }}
+          ║  etcd health:       {{ '✓ Healthy' if etcd_health.rc == 0 else '⚠️ Check manually' }}
+          ║                                                                  ║
+          ║  {{ 'Remember to update hosts.ini to reflect changes' }}
+          ║                                                                  ║
+          ║  Verify with:                                                    ║
+          ║    kubectl get nodes -l node-role.kubernetes.io/control-plane    ║
+          ║    kubectl get --raw=/healthz/etcd                               ║
+          ╚══════════════════════════════════════════════════════════════════╝

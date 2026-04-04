@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="980" viewBox="0 0 1200 980" role="img" aria-labelledby="title desc">
+  <title id="title">Pi K3s Cluster Architecture Overview</title>
+  <desc id="desc">Diagram showing host preparation, K3s, networking and storage add-ons, and monitoring components for the Raspberry Pi K3s cluster.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f6f8f4; }
+      .title { font: 700 30px "DejaVu Sans", Arial, sans-serif; fill: #1b4332; }
+      .subtitle { font: 400 16px "DejaVu Sans", Arial, sans-serif; fill: #355070; }
+      .section { font: 700 20px "DejaVu Sans", Arial, sans-serif; fill: #16324f; }
+      .body { font: 400 15px "DejaVu Sans", Arial, sans-serif; fill: #243b53; }
+      .small { font: 400 13px "DejaVu Sans", Arial, sans-serif; fill: #486581; }
+      .box { rx: 18; ry: 18; stroke-width: 2; }
+      .layer { rx: 26; ry: 26; stroke-width: 2.5; }
+      .arrow { stroke: #486581; stroke-width: 3; fill: none; marker-end: url(#arrowhead); }
+      .dashed { stroke-dasharray: 8 7; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 8 3.5, 0 7" fill="#486581" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="980" />
+
+  <text class="title" x="60" y="58">Pi K3s Cluster Architecture</text>
+  <text class="subtitle" x="60" y="88">1 control plane, 3 workers, SSD-backed storage, Cilium primary networking, Multus storage network, VictoriaMetrics monitoring</text>
+
+  <rect class="layer" x="50" y="120" width="1100" height="165" fill="#e3f2e8" stroke="#74a57f" />
+  <text class="section" x="80" y="155">Layer 1: Host Preparation</text>
+  <rect class="box" x="80" y="175" width="240" height="82" fill="#ffffff" stroke="#9cc5a1" />
+  <text class="body" x="100" y="205">Ubuntu on Raspberry Pi</text>
+  <text class="small" x="100" y="228">SSH, time sync, base OS</text>
+  <rect class="box" x="350" y="175" width="240" height="82" fill="#ffffff" stroke="#9cc5a1" />
+  <text class="body" x="370" y="205">SSD-backed paths</text>
+  <text class="small" x="370" y="228">/mnt/ssd, /var/log, K3s data</text>
+  <rect class="box" x="620" y="175" width="240" height="82" fill="#ffffff" stroke="#9cc5a1" />
+  <text class="body" x="640" y="205">Kernel + cgroups</text>
+  <text class="small" x="640" y="228">Required for Kubernetes workloads</text>
+  <rect class="box" x="890" y="175" width="220" height="82" fill="#ffffff" stroke="#9cc5a1" />
+  <text class="body" x="910" y="205">br-storage bridge</text>
+  <text class="small" x="910" y="228">USB NIC dedicated storage LAN</text>
+
+  <rect class="layer" x="50" y="315" width="1100" height="145" fill="#e8f0fe" stroke="#6b9ac4" />
+  <text class="section" x="80" y="350">Layer 2: Kubernetes Foundation</text>
+  <rect class="box" x="80" y="372" width="440" height="62" fill="#ffffff" stroke="#8db3e2" />
+  <text class="body" x="100" y="400">K3s Control Plane</text>
+  <text class="small" x="245" y="400">API server, scheduler, controllers, embedded datastore</text>
+  <rect class="box" x="560" y="372" width="550" height="62" fill="#ffffff" stroke="#8db3e2" />
+  <text class="body" x="580" y="400">K3s Agents on Workers</text>
+  <text class="small" x="742" y="400">Run workloads after Cilium replaces the default networking stack</text>
+
+  <rect class="layer" x="50" y="490" width="1100" height="245" fill="#fff3db" stroke="#d4a373" />
+  <text class="section" x="80" y="525">Layer 3: Cluster Services</text>
+  <rect class="box" x="80" y="548" width="280" height="70" fill="#ffffff" stroke="#e2b782" />
+  <text class="body" x="100" y="576">Cilium</text>
+  <text class="small" x="170" y="576">Primary CNI, kube-proxy replacement, L2 LB, Hubble</text>
+  <rect class="box" x="390" y="548" width="220" height="70" fill="#ffffff" stroke="#e2b782" />
+  <text class="body" x="410" y="576">Traefik</text>
+  <text class="small" x="480" y="576">Ingress + Gateway API + metrics</text>
+  <rect class="box" x="640" y="548" width="220" height="70" fill="#ffffff" stroke="#e2b782" />
+  <text class="body" x="660" y="576">Multus</text>
+  <text class="small" x="725" y="576">Secondary interfaces for selected pods</text>
+  <rect class="box" x="890" y="548" width="220" height="70" fill="#ffffff" stroke="#e2b782" />
+  <text class="body" x="910" y="576">Whereabouts</text>
+  <text class="small" x="995" y="576">IPAM for the storage subnet</text>
+  <rect class="box" x="310" y="645" width="580" height="70" fill="#ffffff" stroke="#e2b782" />
+  <text class="body" x="330" y="673">Longhorn</text>
+  <text class="small" x="415" y="673">Distributed block storage using SSDs and the Multus-backed storage network</text>
+
+  <rect class="layer" x="50" y="760" width="1100" height="160" fill="#f6e6ef" stroke="#b56576" />
+  <text class="section" x="80" y="795">Layer 4: Observability</text>
+  <rect class="box" x="80" y="815" width="230" height="70" fill="#ffffff" stroke="#d08aa0" />
+  <text class="body" x="100" y="843">Node Exporter</text>
+  <text class="small" x="100" y="866">Node health and system metrics</text>
+  <rect class="box" x="340" y="815" width="230" height="70" fill="#ffffff" stroke="#d08aa0" />
+  <text class="body" x="360" y="843">VMAgent</text>
+  <text class="small" x="360" y="866">Discovers and scrapes targets</text>
+  <rect class="box" x="600" y="815" width="230" height="70" fill="#ffffff" stroke="#d08aa0" />
+  <text class="body" x="620" y="843">VictoriaMetrics Single</text>
+  <text class="small" x="620" y="866">Stores metrics and answers queries</text>
+  <rect class="box" x="860" y="815" width="230" height="70" fill="#ffffff" stroke="#d08aa0" />
+  <text class="body" x="880" y="843">Grafana</text>
+  <text class="small" x="880" y="866">Dashboards for operators</text>
+
+  <path class="arrow" d="M 600 285 L 600 315" />
+  <path class="arrow" d="M 600 460 L 600 490" />
+  <path class="arrow" d="M 600 735 L 600 760" />
+
+  <path class="arrow dashed" d="M 220 618 L 220 645" />
+  <path class="arrow dashed" d="M 750 618 L 750 645" />
+  <path class="arrow dashed" d="M 1000 618 L 1000 645 L 890 645" />
+  <path class="arrow dashed" d="M 500 618 L 500 548" />
+
+  <path class="arrow" d="M 455 850 L 600 850" />
+  <path class="arrow" d="M 715 850 L 860 850" />
+  <path class="arrow dashed" d="M 220 815 L 340 815" />
+
+  <text class="small" x="89" y="940">Primary LAN: K3s API, pod networking, Traefik LoadBalancer IPs</text>
+  <text class="small" x="650" y="940">Storage LAN: static node storage IPs, Multus NAD, Whereabouts IPAM, Longhorn replication</text>
+</svg>

@@ -1,0 +1,41 @@
+---
+# Shared cluster-wide configuration used by playbooks and documentation.
+
+# Core cluster settings
+k3s_version: v1.31.3+k3s1
+master_ip: 192.168.1.41
+
+# Network configuration
+storage_network_range: 192.168.10.0/24
+loadbalancer_ip_range: 192.168.1.200/31
+
+# Add-on versions
+cilium_version: "1.16.4"
+longhorn_version: "1.7.2"
+traefik_version: "30.1.0"
+multus_version: "v4.1.3"
+whereabouts_version: "v0.9.3"
+longhorn_control_plane_allow_scheduling: false
+workload_node_label_key: "pi-cluster.io/workload-node"
+workload_node_label_value: "true"
+
+# Monitoring stack
+victoria_metrics_version: "0.25.0"
+grafana_version: "8.5.0"
+node_exporter_chart_version: "4.39.0"
+vmagent_chart_version: "0.14.0"
+vm_retention: "7d"
+vm_storage_size: "10Gi"
+grafana_storage_size: "2Gi"
+storage_class: "longhorn"
+grafana_root_url: "http://192.168.1.200/grafana"
+grafana_admin_password: "admin"
+vmagent_scrape_interval: "30s"
+vmagent_scrape_timeout: "10s"
+vmagent_stream_parse: "true"
+vmagent_discovery_concurrency: "1"
+traefik_metrics_port: 9100
+monitoring_smoke_test_metric_names:
+  - cilium_process_cpu_seconds_total
+  - hubble_dns_queries_total
+  - traefik_entrypoint_requests_total

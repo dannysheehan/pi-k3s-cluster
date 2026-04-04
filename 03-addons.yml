@@ -1,0 +1,749 @@
+---
+# ============================================================================
+# Raspberry Pi K3s Cluster - Add-ons Installation Playbook
+# ============================================================================
+#
+# This playbook installs the complete networking, storage, and ingress stack
+# for the K3s cluster. It must be run AFTER 02-k3s-install.yml.
+#
+# Components installed:
+# 1. Cilium CNI with kube-proxy replacement and L2 LoadBalancer support
+# 2. Multus CNI for multi-network interfaces
+# 3. Whereabouts IPAM for secondary network IP management
+# 4. Longhorn distributed storage with dedicated storage network
+# 5. Traefik ingress controller with Gateway API support
+#
+# Prerequisites:
+# - K3s cluster installed and kubeconfig available at ~/.kube/config-rpi
+# - Nodes accessible via Ansible inventory
+# - Storage network interfaces configured (01-infra-prep.yml)
+#
+# ============================================================================
+
+# First play: Load inventory variables from k3s_cluster hosts
+- name: Load inventory variables
+  hosts: k3s_cluster
+  gather_facts: false
+  tasks:
+    - name: Inventory loaded
+      ansible.builtin.debug:
+        msg: "Loaded inventory for {{ inventory_hostname }} with storage_ip={{ storage_ip }}"
+
+# Second play: Install cluster add-ons from localhost
+- name: Install Cluster Add-ons
+  hosts: localhost
+  connection: local
+  vars:
+    kubeconfig: ~/.kube/config-rpi
+    # Storage network configuration
+    # This network is used exclusively for Longhorn replication traffic
+    storage_network_cidr: "{{ storage_network_range }}"
+  tasks:
+    # ========================================================================
+    # STORAGE NETWORK IP EXCLUSION LIST
+    # ========================================================================
+    # Dynamically builds exclude list from storage_ip values in hosts.ini
+    # This prevents Whereabouts IPAM from assigning IPs already used by:
+    # - The Raspberry Pi nodes themselves (192.168.10.41-44)
+    - name: Build storage IP exclude list from inventory
+      ansible.builtin.set_fact:
+        storage_exclude_ips: >-
+          {{ groups['k3s_cluster'] | map('extract', hostvars, 'storage_ip') | select('defined') | list }}
+      tags: [storage, longhorn, multus, whereabouts]
+
+    - name: Display exclude list for verification
+      ansible.builtin.debug:
+        msg: "Whereabouts will exclude these IPs: {{ storage_exclude_ips }}"
+      tags: [storage, longhorn, multus, whereabouts]
+
+    # ========================================================================
+    # CILIUM CNI - Primary Container Network Interface
+    # ========================================================================
+    # Cilium replaces:
+    # - Flannel (K3s default CNI)
+    # - kube-proxy (with eBPF-based kube-proxy replacement)
+    # - Klipper LoadBalancer (with L2 announcements)
+    #
+    # Features enabled:
+    # - kube-proxy replacement for better performance
+    # - L2 announcements for LoadBalancer services
+    # - Hubble for network observability and monitoring
+    #
+    # IMPORTANT: cni.exclusive must be false to allow Multus to coexist with
+    # Cilium. Without this, Cilium will rename any non-Cilium CNI config files
+    # (like 00-multus.conf) to .cilium_bak, breaking secondary network support.
+    # ========================================================================
+    - name: Add Cilium Helm Repo
+      kubernetes.core.helm_repository:
+        name: cilium
+        repo_url: "https://helm.cilium.io/"
+      tags: [cilium, networking]
+
+    - name: Install Cilium
+      kubernetes.core.helm:
+        name: cilium
+        chart_ref: cilium/cilium
+        chart_version: "{{ cilium_version }}"
+        release_namespace: kube-system
+        kubeconfig: "{{ kubeconfig }}"
+        values:
+          kubeProxyReplacement: true
+          k8sServiceHost: "{{ master_ip | default('192.168.1.41') }}"
+          k8sServicePort: 6443
+          l2announcements:
+            enabled: true
+          externalIPs:
+            enabled: true
+          # Allow Multus CNI to coexist with Cilium for secondary networks
+          # Without this, Cilium renames 00-multus.conf to .cilium_bak
+          cni:
+            exclusive: false
+          # Fix for RPi4/Ubuntu MTU issues if present
+          mtu: 1450
+          # Prometheus metrics for Cilium agent
+          # Exposes metrics on port 9962 for monitoring
+          prometheus:
+            enabled: true
+            port: 9962
+            serviceMonitor:
+              enabled: false  # We use vmagent, not Prometheus Operator
+          # Hubble observability
+          hubble:
+            enabled: true
+            relay:
+              enabled: true
+            ui:
+              enabled: true
+            metrics:
+              enabled:
+                - dns
+                - drop
+                - tcp
+                - flow
+                - icmp
+                - http
+              # Expose Hubble metrics on port 9965
+              serviceMonitor:
+                enabled: false  # We use vmagent, not Prometheus Operator
+      tags: [cilium, networking]
+
+    - name: Wait for Cilium to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: DaemonSet
+        namespace: kube-system
+        name: cilium
+      register: cilium_ds
+      retries: 30
+      delay: 10
+      until: >
+        cilium_ds.resources | length > 0 and
+        (cilium_ds.resources[0].status.numberReady | default(0)) ==
+        (cilium_ds.resources[0].status.desiredNumberScheduled | default(1))
+      tags: [cilium, networking]
+
+    # ========================================================================
+    # CILIUM L2 LOADBALANCER CONFIGURATION
+    # ========================================================================
+    # Cilium L2 Announcements provide LoadBalancer IP allocation and ARP
+    # responses for Kubernetes LoadBalancer services. This replaces K3s's
+    # default Klipper LoadBalancer.
+    #
+    # Configuration:
+    # - CiliumLoadBalancerIPPool: Defines the IP range for LoadBalancer IPs
+    # - CiliumL2AnnouncementPolicy: Enables L2 ARP announcements on eth0
+    #
+    # The IP pool (192.168.1.200-201) provides 2 IPs for services like Traefik.
+    # Adjust the loadbalancer_ip_range variable if you need more IPs.
+    # ========================================================================
+    - name: Create Cilium LoadBalancer IP Pool
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: cilium.io/v2alpha1
+          kind: CiliumLoadBalancerIPPool
+          metadata:
+            name: default-pool
+          spec:
+            blocks:
+              - cidr: "{{ loadbalancer_ip_range }}"
+      tags: [cilium, networking, loadbalancer]
+
+    - name: Create Cilium L2 Announcement Policy
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: cilium.io/v2alpha1
+          kind: CiliumL2AnnouncementPolicy
+          metadata:
+            name: default-policy
+          spec:
+            loadBalancerIPs: true
+            interfaces:
+              - ^eth0
+            nodeSelector:
+              matchLabels:
+                kubernetes.io/os: linux
+      tags: [cilium, networking, loadbalancer]
+
+    # ========================================================================
+    # MULTUS CNI - Multi-Network Interface Support
+    # ========================================================================
+    # Multus allows pods to attach to multiple network interfaces.
+    # This is used to attach Longhorn pods to the dedicated storage network
+    # (br-storage) separate from the primary network (eth0).
+    #
+    # The thick plugin deployment is used for better stability.
+    # Important relationship:
+    # - Cilium remains the primary/default CNI
+    # - Multus adds extra interfaces only for workloads that request them
+    # If new pods get stuck in ContainerCreating after this point, check the
+    # kube-multus-ds rollout and host CNI state on the nodes.
+    # ========================================================================
+    - name: Install Multus (Thick Plugin)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('url', 'https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/' ~ multus_version ~ '/deployments/multus-daemonset-thick.yml', split_lines=False) }}"
+      tags: [multus, networking, storage]
+
+    - name: Patch Multus DaemonSet for reboot race and netns path
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: DaemonSet
+        namespace: kube-system
+        name: kube-multus-ds
+        definition:
+          spec:
+            template:
+              spec:
+                initContainers:
+                  - name: install-multus-binary
+                    image: ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
+                    imagePullPolicy: IfNotPresent
+                    command:
+                      - /usr/src/multus-cni/bin/install_multus
+                      - -d
+                      - /host/opt/cni/bin
+                      - -t
+                      - thick
+                    securityContext:
+                      privileged: true
+                    volumeMounts:
+                      - name: cnibin
+                        mountPath: /host/opt/cni/bin
+                containers:
+                  - name: kube-multus
+                    image: ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
+                    imagePullPolicy: IfNotPresent
+                    command:
+                      - /usr/src/multus-cni/bin/multus-daemon
+                    securityContext:
+                      privileged: true
+                    env:
+                      - name: MULTUS_NODE_NAME
+                        valueFrom:
+                          fieldRef:
+                            apiVersion: v1
+                            fieldPath: spec.nodeName
+                    volumeMounts:
+                      - name: multus-daemon-config
+                        mountPath: /etc/cni/net.d/multus.d
+                        readOnly: true
+                      - name: cni
+                        mountPath: /host/etc/cni/net.d
+                      - name: host-run
+                        mountPath: /host/run
+                      - name: hostroot
+                        mountPath: /hostroot
+                        mountPropagation: HostToContainer
+                      - name: cnibin
+                        mountPath: /opt/cni/bin
+                      - name: host-run-k8s-cni-cncf-io
+                        mountPath: /run/k8s.cni.cncf.io
+                      - name: host-run-netns
+                        mountPath: /run/netns
+                        mountPropagation: HostToContainer
+                      - name: host-var-lib-cni-multus
+                        mountPath: /var/lib/cni/multus
+                      - name: host-var-lib-kubelet
+                        mountPath: /var/lib/kubelet
+                        mountPropagation: HostToContainer
+                    resources:
+                      requests:
+                        cpu: 200m
+                        memory: 100Mi
+                volumes:
+                  - name: cni
+                    hostPath:
+                      path: /etc/cni/net.d
+                  - name: cnibin
+                    hostPath:
+                      path: /opt/cni/bin
+                  - name: hostroot
+                    hostPath:
+                      path: /
+                  - name: multus-daemon-config
+                    configMap:
+                      name: multus-daemon-config
+                  - name: host-run
+                    hostPath:
+                      path: /run
+                  - name: host-var-lib-cni-multus
+                    hostPath:
+                      path: /var/lib/cni/multus
+                  - name: host-var-lib-kubelet
+                    hostPath:
+                      path: /var/lib/kubelet
+                  - name: host-run-k8s-cni-cncf-io
+                    hostPath:
+                      path: /run/k8s.cni.cncf.io
+                  - name: host-run-netns
+                    hostPath:
+                      path: /run/netns/
+      tags: [multus, networking, storage]
+
+    - name: Wait for Multus to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: DaemonSet
+        namespace: kube-system
+        name: kube-multus-ds
+      register: multus_ds
+      until: >
+        multus_ds.resources | length > 0 and
+        (multus_ds.resources[0].status.numberReady | default(0)) ==
+        (multus_ds.resources[0].status.desiredNumberScheduled | default(1))
+      retries: 30
+      delay: 10
+      tags: [multus, networking, storage]
+
+    - name: Re-check Cilium after Multus install
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: DaemonSet
+        namespace: kube-system
+        name: cilium
+      register: cilium_after_multus
+      until: >
+        cilium_after_multus.resources | length > 0 and
+        (cilium_after_multus.resources[0].status.numberReady | default(0)) ==
+        (cilium_after_multus.resources[0].status.desiredNumberScheduled | default(1))
+      retries: 18
+      delay: 10
+      tags: [multus, cilium, networking]
+
+    - name: Get Kubernetes nodes for workload placement policy
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Node
+      register: kubernetes_nodes
+      tags: [cilium, longhorn, traefik, storage, ingress]
+
+    - name: Label worker nodes for workload placement
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Node
+        name: "{{ item.metadata.name }}"
+        definition:
+          metadata:
+            labels: "{{ workload_node_label_map }}"
+      vars:
+        workload_node_label_map: >-
+          {{ { workload_node_label_key: workload_node_label_value } }}
+      loop: "{{ kubernetes_nodes.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - "'node-role.kubernetes.io/control-plane' not in (item.metadata.labels | default({}))"
+      tags: [longhorn, traefik, storage, ingress]
+
+    # ========================================================================
+    # WHEREABOUTS IPAM - IP Address Management for Secondary Networks
+    # ========================================================================
+    # Whereabouts is only for secondary interfaces managed by Multus.
+    # It should not allocate over the statically assigned node storage IPs,
+    # which is why we build the exclude list from inventory.
+    - name: Install Whereabouts CRDs
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('url', 'https://raw.githubusercontent.com/k8snetworkplumbingwg/whereabouts/' ~ whereabouts_version ~ '/doc/crds/whereabouts.cni.cncf.io_ippools.yaml', split_lines=False) }}"
+      tags: [whereabouts, networking, storage]
+
+    - name: Install Whereabouts OverlappingRangeIPReservations CRD
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('url', 'https://raw.githubusercontent.com/k8snetworkplumbingwg/whereabouts/' ~ whereabouts_version ~ '/doc/crds/whereabouts.cni.cncf.io_overlappingrangeipreservations.yaml', split_lines=False) }}"
+      tags: [whereabouts, networking, storage]
+
+    - name: Install Whereabouts DaemonSet
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('url', 'https://raw.githubusercontent.com/k8snetworkplumbingwg/whereabouts/' ~ whereabouts_version ~ '/doc/crds/daemonset-install.yaml', split_lines=False) }}"
+      tags: [whereabouts, networking, storage]
+
+    # ========================================================================
+    # LONGHORN DISTRIBUTED STORAGE
+    # ========================================================================
+    # Longhorn provides distributed block storage for Kubernetes.
+    # Key features:
+    # - Replication across multiple nodes for high availability
+    # - Snapshots and backups
+    # - Volume encryption
+    # - Dedicated storage network for replication traffic
+    #
+    # Storage path: /mnt/ssd/longhorn on each node (USB SSD)
+    #
+    # STORAGE NETWORK CONFIGURATION:
+    # Uses Multus with ipvlan to attach Longhorn pods to the storage network.
+    # ipvlan is used instead of macvlan because it shares the MAC address
+    # with the parent interface, which works better with bridges.
+    #
+    # The storage-ip annotation overrides the IP that Longhorn uses for
+    # replication traffic, ensuring it uses the node's br-storage IP.
+    # In practice the storage path looks like:
+    # br-storage on node -> Multus NAD -> Whereabouts IP assignment ->
+    # Longhorn storageNetwork setting -> longhorn.io/storage-ip annotation.
+    #
+    # Control-plane policy:
+    # This repo treats the control-plane node as reserved for cluster services.
+    # Longhorn storage scheduling should stay worker-only, even if a
+    # control-plane node is visible to Longhorn. We enforce that below by
+    # patching any control-plane Longhorn nodes to allowScheduling=false.
+    #
+    # Placement policy:
+    # We also apply a custom worker-node label and tell Longhorn to prefer only
+    # those nodes for both user-managed and system-managed components. This
+    # keeps CSI controllers and other Longhorn services off the control plane
+    # after fresh installs and upgrades.
+    # ========================================================================
+    - name: Create longhorn-system namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: longhorn-system
+      tags: [longhorn, storage]
+
+    # Storage Network Attachment Definition
+    # Uses the bridge CNI plugin to connect pods to the br-storage bridge.
+    # Bridge mode (veth pairs) is used instead of ipvlan because Longhorn's
+    # iSCSI initiator runs in the host network namespace via nsenter. With
+    # ipvlan L2, the host cannot reach its own pod's ipvlan address (a known
+    # Linux kernel limitation), causing "No route to host" on iSCSI discovery.
+    # Bridge mode creates veth pairs so the host can reach pod IPs through
+    # br-storage, which also carries cross-node replication traffic via the
+    # physical USB NIC.
+    - name: Create Storage Network Attachment Definition
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: "k8s.cni.cncf.io/v1"
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: storage-network
+            namespace: longhorn-system
+          spec:
+            config: "{{ storage_config | to_json }}"
+      vars:
+        storage_config:
+          cniVersion: "0.3.1"
+          type: "bridge"
+          bridge: "br-storage"
+          isGateway: false
+          ipMasq: false
+          hairpinMode: false
+          ipam:
+            type: "whereabouts"
+            range: "{{ storage_network_cidr }}"
+            exclude: "{{ storage_exclude_ips }}"
+      tags: [longhorn, multus, whereabouts, storage]
+
+    - name: Add Longhorn Helm Repo
+      kubernetes.core.helm_repository:
+        name: longhorn
+        repo_url: "https://charts.longhorn.io"
+      tags: [longhorn, storage]
+
+    - name: Install Longhorn
+      kubernetes.core.helm:
+        name: longhorn
+        chart_ref: longhorn/longhorn
+        chart_version: "{{ longhorn_version }}"
+        release_namespace: longhorn-system
+        create_namespace: no  # Already created above
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 900s
+        values:
+          global:
+            nodeSelector: "{{ workload_node_selector }}"
+          defaultSettings:
+            defaultDataPath: "/mnt/ssd/longhorn"
+            # Use Multus storage network for replication traffic
+            storageNetwork: "longhorn-system/storage-network"
+            # Format required by Longhorn: key:value;key2:value2
+            systemManagedComponentsNodeSelector: "{{ workload_node_label_key }}:{{ workload_node_label_value }}"
+      vars:
+        workload_node_selector: >-
+          {{ { workload_node_label_key: workload_node_label_value } }}
+      register: longhorn_install
+      tags: [longhorn, storage]
+
+    - name: Wait for Longhorn manager to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: DaemonSet
+        namespace: longhorn-system
+        name: longhorn-manager
+      register: longhorn_manager
+      until: >
+        longhorn_manager.resources | length > 0 and
+        (longhorn_manager.resources[0].status.numberReady | default(0)) ==
+        (longhorn_manager.resources[0].status.desiredNumberScheduled | default(1))
+      retries: 60
+      delay: 10
+      tags: [longhorn, storage]
+
+    - name: Wait for Longhorn admission webhook service endpoints
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Endpoints
+        namespace: longhorn-system
+        name: longhorn-admission-webhook
+      register: longhorn_admission_webhook_endpoints
+      until: >
+        longhorn_admission_webhook_endpoints.resources | length > 0 and
+        (
+          longhorn_admission_webhook_endpoints.resources[0].subsets | default([])
+          | map(attribute='addresses') | flatten | length
+        ) > 0
+      retries: 60
+      delay: 10
+      tags: [longhorn, storage]
+
+    # Get actual Longhorn node names (may differ from inventory names)
+    - name: Get Longhorn nodes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: longhorn.io/v1beta2
+        kind: Node
+        namespace: longhorn-system
+      register: longhorn_nodes
+      tags: [longhorn, storage]
+
+    - name: Build control-plane Kubernetes node list
+      ansible.builtin.set_fact:
+        control_plane_k8s_node_names: >-
+          {%- set names = [] -%}
+          {%- for node in kubernetes_nodes.resources | default([]) -%}
+          {%-   if 'node-role.kubernetes.io/control-plane' in (node.metadata.labels | default({})) -%}
+          {%-     set _ = names.append(node.metadata.name) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ names }}
+      tags: [longhorn, storage]
+
+    # Annotate Longhorn nodes with storage IPs
+    # This overrides the Whereabouts-assigned IP with the node's actual br-storage IP
+    # and is one of the first things to check if Longhorn engine/replica traffic
+    # reports route or connectivity issues.
+    - name: Annotate Longhorn nodes with storage IPs
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Node
+        api_version: longhorn.io/v1beta2
+        name: "{{ item.metadata.name }}"
+        namespace: longhorn-system
+        definition:
+          metadata:
+            annotations:
+              longhorn.io/storage-ip: "{{ matched_storage_ip }}"
+      vars:
+        # Find inventory host where Longhorn node name contains inventory hostname
+        matched_host: >-
+          {{ groups['k3s_cluster'] | select('in', item.metadata.name) | first | default(none) }}
+        matched_storage_ip: >-
+          {{ hostvars[matched_host].storage_ip | default('') if matched_host else '' }}
+      loop: "{{ longhorn_nodes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - longhorn_nodes.resources is defined
+        - matched_storage_ip != ''
+        - (item.metadata.annotations | default({})).get('longhorn.io/storage-ip', '') != matched_storage_ip
+      tags: [longhorn, storage]
+
+    - name: Disable Longhorn scheduling on control-plane nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Node
+        api_version: longhorn.io/v1beta2
+        name: "{{ item.metadata.name }}"
+        namespace: longhorn-system
+        definition:
+          spec:
+            allowScheduling: "{{ longhorn_control_plane_allow_scheduling }}"
+      loop: "{{ longhorn_nodes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - not longhorn_control_plane_allow_scheduling | bool
+        - item.metadata.name in control_plane_k8s_node_names
+      tags: [longhorn, storage]
+
+    - name: Spread Longhorn CSI controller deployments across worker nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Deployment
+        namespace: longhorn-system
+        name: "{{ item }}"
+        definition:
+          spec:
+            template:
+              spec:
+                nodeSelector: "{{ workload_node_selector }}"
+                affinity:
+                  podAntiAffinity:
+                    preferredDuringSchedulingIgnoredDuringExecution:
+                      - weight: 100
+                        podAffinityTerm:
+                          labelSelector:
+                            matchExpressions:
+                              - key: app
+                                operator: In
+                                values:
+                                  - "{{ item }}"
+                          topologyKey: kubernetes.io/hostname
+      loop:
+        - csi-attacher
+        - csi-provisioner
+        - csi-resizer
+        - csi-snapshotter
+      vars:
+        workload_node_selector: >-
+          {{ { workload_node_label_key: workload_node_label_value } }}
+      tags: [longhorn, storage]
+
+    - name: Verify Longhorn is running
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: longhorn-system
+        name: longhorn-ui
+      register: longhorn_ui
+      until: >
+        longhorn_ui.resources | length > 0 and
+        (longhorn_ui.resources[0].status.readyReplicas | default(0)) ==
+        (longhorn_ui.resources[0].status.replicas | default(1))
+      retries: 60
+      delay: 10
+      tags: [longhorn, storage]
+
+    - name: Display Longhorn status
+      ansible.builtin.debug:
+        msg: "Longhorn UI deployment: {{ longhorn_ui.resources[0].status.readyReplicas | default(0) }}/{{ longhorn_ui.resources[0].status.replicas | default(0) }} replicas ready"
+      when: longhorn_ui.resources | length > 0
+      tags: [longhorn, storage]
+
+    # ========================================================================
+    # TRAEFIK INGRESS CONTROLLER - Dual-Mode (Ingress + Gateway API)
+    # ========================================================================
+    # Traefik is deployed as the ingress controller with support for:
+    # 1. Traditional Kubernetes Ingress resources
+    # 2. Kubernetes Gateway API (HTTPRoute, Gateway, etc.)
+    #
+    # Why dual-mode?
+    # - Provides compatibility with existing Ingress resources
+    # - Supports modern Gateway API for advanced routing
+    # - Single LoadBalancer IP serves both routing methods
+    # - Efficient use of limited LoadBalancer IP pool (only 2 IPs total)
+    #
+    # LoadBalancer: Gets IP from Cilium L2 pool (192.168.1.200)
+    # ========================================================================
+    - name: Add Traefik Helm Repo
+      kubernetes.core.helm_repository:
+        name: traefik
+        repo_url: "https://traefik.github.io/charts"
+      tags: [traefik, ingress]
+
+    - name: Create traefik namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: traefik
+      tags: [traefik, ingress]
+
+    - name: Install Traefik with Gateway API support
+      kubernetes.core.helm:
+        name: traefik
+        chart_ref: traefik/traefik
+        chart_version: "30.1.0"
+        release_namespace: traefik
+        create_namespace: no
+        kubeconfig: "{{ kubeconfig }}"
+        values:
+          # Use Cilium L2 announcements for LoadBalancer
+          service:
+            type: LoadBalancer
+          # Enable BOTH Ingress and Gateway API providers
+          providers:
+            kubernetesIngress:
+              enabled: true
+              publishedService:
+                enabled: true
+            kubernetesGateway:
+              enabled: true
+          # Gateway API support
+          gatewayClass:
+            enabled: true
+            name: traefik
+          # Enable dashboard (access via port-forward)
+          ingressRoute:
+            dashboard:
+              enabled: true
+          # Resource limits for Raspberry Pi
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # Enable access logs
+          logs:
+            access:
+              enabled: true
+      tags: [traefik, ingress, gateway_api]
+
+    - name: Verify Traefik is running
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: traefik
+        name: traefik
+      register: traefik_deploy
+      tags: [traefik, ingress, gateway_api]
+
+    - name: Display Traefik status
+      ansible.builtin.debug:
+        msg: "Traefik deployment: {{ traefik_deploy.resources[0].status.readyReplicas | default(0) }}/{{ traefik_deploy.resources[0].status.replicas | default(0) }} replicas ready"
+      when: traefik_deploy.resources | length > 0
+      tags: [traefik, ingress, gateway_api]

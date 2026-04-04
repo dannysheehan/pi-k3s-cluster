@@ -1,0 +1,228 @@
+---
+# ============================================================================
+# CLUSTER STARTUP PLAYBOOK
+# ============================================================================
+# Safely starts the K3s cluster in the correct order:
+# 1. Wake/verify control plane is up
+# 2. Start K3s server on control plane
+# 3. Wait for API server to be ready
+# 4. Wake/verify workers are up
+# 5. Start K3s agent on workers
+# 6. Uncordon all nodes
+# 7. Verify cluster health
+#
+# Usage:
+#   ansible-playbook cluster-startup.yml
+#
+# Note: This assumes nodes are already powered on. If using Wake-on-LAN,
+# you can add WoL tasks before the startup sequence.
+# ============================================================================
+
+- name: Verify Control Plane is Accessible
+  hosts: masters
+  gather_facts: false
+  vars:
+    startup_wait: 30
+
+  tasks:
+    - name: Display startup message
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          CLUSTER STARTUP
+          ============================================================
+          Starting K3s cluster...
+          
+          Ensure all nodes are powered on before running this playbook.
+          ============================================================
+
+    - name: Wait for control plane to be reachable
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+      register: connection_result
+
+    - name: Gather facts after connection
+      ansible.builtin.setup:
+
+    - name: Display control plane status
+      ansible.builtin.debug:
+        msg: "Control plane {{ inventory_hostname }} is reachable"
+
+# ============================================================================
+# PHASE 1: START K3S SERVER ON CONTROL PLANE
+# ============================================================================
+- name: Start K3s Server on Control Plane
+  hosts: masters
+  become: true
+  gather_facts: true
+  vars:
+    api_ready_timeout: 180
+
+  tasks:
+    - name: Start K3s server service
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait for K3s server to initialize
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting for K3s server to initialize..."
+
+    - name: Wait for API server to be ready
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:6443/healthz"
+        validate_certs: false
+        status_code: 200
+      register: api_health
+      until: api_health.status == 200
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: Display API server status
+      ansible.builtin.debug:
+        msg: "K3s API server is ready on {{ inventory_hostname }}"
+      when: api_health.status == 200
+
+# ============================================================================
+# PHASE 2: VERIFY WORKERS ARE ACCESSIBLE
+# ============================================================================
+- name: Verify Workers are Accessible
+  hosts: workers
+  gather_facts: false
+
+  tasks:
+    - name: Wait for worker nodes to be reachable
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+      register: worker_connection
+
+    - name: Gather facts after connection
+      ansible.builtin.setup:
+
+    - name: Display worker status
+      ansible.builtin.debug:
+        msg: "Worker {{ inventory_hostname }} is reachable"
+
+# ============================================================================
+# PHASE 3: START K3S AGENT ON WORKERS
+# ============================================================================
+- name: Start K3s Agent on Worker Nodes
+  hosts: workers
+  become: true
+  gather_facts: true
+  serial: 2
+
+  tasks:
+    - name: Start K3s agent service
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: started
+        enabled: true
+
+    - name: Wait for K3s agent to connect
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Display agent status
+      ansible.builtin.debug:
+        msg: "K3s agent started on {{ inventory_hostname }}"
+
+# ============================================================================
+# PHASE 4: UNCORDON NODES AND VERIFY CLUSTER
+# ============================================================================
+- name: Uncordon Nodes and Verify Cluster Health
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config-rpi', true) }}"
+    expected_node_count: "{{ groups['k3s_cluster'] | length }}"
+
+  tasks:
+    - name: Wait for all nodes to register
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting for all nodes to register with the cluster..."
+
+    - name: Get list of all nodes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Node
+      register: cluster_nodes
+      until: cluster_nodes.resources | length >= expected_node_count | int
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: Uncordon all nodes
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item.metadata.name }}"
+        state: uncordon
+      loop: "{{ cluster_nodes.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: cluster_nodes.resources is defined
+      ignore_errors: true
+
+    - name: Wait for nodes to become Ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Node
+      register: node_status
+      until: >
+        node_status.resources is defined and
+        node_status.resources | length >= expected_node_count | int and
+        (node_status.resources | selectattr('status.conditions', 'defined') |
+         map(attribute='status.conditions') | flatten |
+         selectattr('type', 'equalto', 'Ready') |
+         selectattr('status', 'equalto', 'True') | list | length) >= expected_node_count | int
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          CLUSTER STARTUP COMPLETE
+          ============================================================
+          Nodes registered: {{ cluster_nodes.resources | default([]) | length }}
+          
+          Node Status:
+          {% for node in cluster_nodes.resources | default([]) %}
+          - {{ node.metadata.name }}: {{ node.status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first | default('Unknown') }}
+          {% endfor %}
+          
+          To verify cluster health:
+            kubectl get nodes
+            kubectl get pods -A
+          
+          Access Grafana:
+            http://192.168.1.200/grafana/
+          ============================================================
+      when: cluster_nodes.resources is defined
+
+    - name: Get pod status summary
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        namespace: ""
+        field_selectors:
+          - status.phase!=Running
+          - status.phase!=Succeeded
+      register: unhealthy_pods
+      ignore_errors: true
+
+    - name: Display unhealthy pods warning
+      ansible.builtin.debug:
+        msg: |
+          WARNING: {{ unhealthy_pods.resources | default([]) | length }} pods are not in Running/Succeeded state.
+          Run 'kubectl get pods -A' to investigate.
+      when:
+        - unhealthy_pods.resources is defined
+        - unhealthy_pods.resources | length > 0

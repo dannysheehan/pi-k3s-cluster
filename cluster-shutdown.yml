@@ -1,0 +1,210 @@
+---
+# ============================================================================
+# CLUSTER SHUTDOWN PLAYBOOK
+# ============================================================================
+# Safely shuts down the entire K3s cluster in the correct order:
+# 1. Cordon all nodes (prevent new workloads)
+# 2. Drain worker nodes (gracefully evict pods)
+# 3. Stop K3s agent on workers
+# 4. Stop K3s server on control plane
+# 5. Power off workers first, then control plane
+#
+# Usage:
+#   ansible-playbook cluster-shutdown.yml
+#
+# To start the cluster again, simply power on the nodes - K3s will auto-start
+# ============================================================================
+
+- name: Safely Shutdown K3s Cluster
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config-rpi', true) }}"
+    drain_timeout: 120
+    shutdown_delay: 10
+
+  tasks:
+    - name: Display shutdown warning
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          WARNING: CLUSTER SHUTDOWN
+          ============================================================
+          This playbook will:
+          1. Cordon all nodes (prevent new scheduling)
+          2. Drain all worker nodes (gracefully evict pods)
+          3. Stop K3s services on all nodes
+          4. Power off all nodes (workers first, then control plane)
+          
+          Press Ctrl+C within 10 seconds to abort...
+          ============================================================
+
+    - name: Countdown before shutdown
+      ansible.builtin.pause:
+        seconds: 10
+        prompt: "Shutting down cluster in 10 seconds... Press Ctrl+C to abort"
+
+    # ========================================================================
+    # PHASE 1: CORDON ALL NODES
+    # ========================================================================
+    - name: Get list of all nodes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Node
+      register: cluster_nodes
+      ignore_errors: true
+
+    - name: Cordon all nodes (prevent new scheduling)
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item.metadata.name }}"
+        state: cordon
+      loop: "{{ cluster_nodes.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: cluster_nodes.resources is defined
+      ignore_errors: true
+
+    # ========================================================================
+    # PHASE 2: DRAIN WORKER NODES
+    # ========================================================================
+    - name: Drain worker nodes (gracefully evict pods)
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item.metadata.name }}"
+        state: drain
+        delete_options:
+          delete_emptydir_data: true
+          ignore_daemonsets: true
+          force: true
+          grace_period: 30
+        timeout: "{{ drain_timeout }}"
+      loop: "{{ cluster_nodes.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - cluster_nodes.resources is defined
+        - "'node-role.kubernetes.io/control-plane' not in (item.metadata.labels | default({}))"
+        - "'node-role.kubernetes.io/master' not in (item.metadata.labels | default({}))"
+      ignore_errors: true
+
+    - name: Display drain completion
+      ansible.builtin.debug:
+        msg: "Worker nodes drained. Proceeding to stop K3s services..."
+
+# ============================================================================
+# PHASE 3: STOP K3S ON WORKERS
+# ============================================================================
+- name: Stop K3s Agent on Worker Nodes
+  hosts: workers
+  become: true
+  gather_facts: false
+  serial: 1
+  vars:
+    shutdown_delay: 5
+
+  tasks:
+    - name: Stop K3s agent service
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: stopped
+      ignore_errors: true
+
+    - name: Wait for K3s agent to stop
+      ansible.builtin.pause:
+        seconds: "{{ shutdown_delay }}"
+
+    - name: Display worker K3s stopped
+      ansible.builtin.debug:
+        msg: "K3s agent stopped on {{ inventory_hostname }}"
+
+# ============================================================================
+# PHASE 4: STOP K3S ON CONTROL PLANE
+# ============================================================================
+- name: Stop K3s Server on Control Plane
+  hosts: masters
+  become: true
+  gather_facts: false
+  vars:
+    shutdown_delay: 10
+
+  tasks:
+    - name: Stop K3s server service
+      ansible.builtin.systemd:
+        name: k3s
+        state: stopped
+      ignore_errors: true
+
+    - name: Wait for K3s server to stop
+      ansible.builtin.pause:
+        seconds: "{{ shutdown_delay }}"
+
+    - name: Display control plane K3s stopped
+      ansible.builtin.debug:
+        msg: "K3s server stopped on {{ inventory_hostname }}"
+
+# ============================================================================
+# PHASE 5: POWER OFF WORKERS
+# ============================================================================
+- name: Power Off Worker Nodes
+  hosts: workers
+  become: true
+  gather_facts: false
+  serial: 1
+  vars:
+    shutdown_delay: 5
+
+  tasks:
+    - name: Display shutdown message for worker
+      ansible.builtin.debug:
+        msg: "Powering off worker node {{ inventory_hostname }}..."
+
+    - name: Power off worker node
+      ansible.builtin.command:
+        cmd: shutdown -h now
+      async: 1
+      poll: 0
+      ignore_errors: true
+
+    - name: Wait between worker shutdowns
+      ansible.builtin.pause:
+        seconds: "{{ shutdown_delay }}"
+      delegate_to: localhost
+
+# ============================================================================
+# PHASE 6: POWER OFF CONTROL PLANE
+# ============================================================================
+- name: Power Off Control Plane
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Wait for workers to fully power off
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting 30 seconds for workers to fully power off..."
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display shutdown message for control plane
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          POWERING OFF CONTROL PLANE: {{ inventory_hostname }}
+          ============================================================
+          The cluster is now fully shut down.
+          
+          To restart the cluster:
+          1. Power on the control plane node first
+          2. Wait 2-3 minutes for K3s to start
+          3. Power on the worker nodes
+          4. K3s agents will automatically reconnect
+          ============================================================
+
+    - name: Power off control plane node
+      ansible.builtin.command:
+        cmd: shutdown -h now
+      async: 1
+      poll: 0
+      ignore_errors: true

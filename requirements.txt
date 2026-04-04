@@ -1,0 +1,15 @@
+# Python dependencies for pi-cluster Ansible automation
+# Install with: pip install -r requirements.txt
+
+# Ansible core
+ansible>=8.0.0,<10.0.0
+
+# Required for IP address manipulation in playbooks
+netaddr>=0.8.0
+
+# Required for kubernetes.core collection
+kubernetes>=26.1.0
+PyYAML>=6.0
+
+# Required for Helm operations
+openshift>=0.13.0

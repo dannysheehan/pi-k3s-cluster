@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Dedicated Storage Network Flow</title>
+  <desc id="desc">Diagram showing how br-storage, Multus, Whereabouts, the storage network attachment definition, and Longhorn interact on the dedicated storage network.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f7f2; }
+      .title { font: 700 28px "DejaVu Sans", Arial, sans-serif; fill: #1d3557; }
+      .subtitle { font: 400 16px "DejaVu Sans", Arial, sans-serif; fill: #4a5568; }
+      .section { font: 700 20px "DejaVu Sans", Arial, sans-serif; fill: #234e52; }
+      .body { font: 400 15px "DejaVu Sans", Arial, sans-serif; fill: #243b53; }
+      .small { font: 400 13px "DejaVu Sans", Arial, sans-serif; fill: #486581; }
+      .box { rx: 18; ry: 18; stroke-width: 2; }
+      .lane { rx: 24; ry: 24; stroke-width: 2.5; }
+      .arrow { stroke: #486581; stroke-width: 3; fill: none; marker-end: url(#arrowhead); }
+      .dashed { stroke-dasharray: 8 7; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 8 3.5, 0 7" fill="#486581" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="760" />
+
+  <text class="title" x="60" y="58">Dedicated Storage Network Flow</text>
+  <text class="subtitle" x="60" y="88">How the host bridge, Multus, Whereabouts, the NetworkAttachmentDefinition, and Longhorn fit together</text>
+
+  <rect class="lane" x="50" y="120" width="1100" height="140" fill="#e8f5e9" stroke="#81b29a" />
+  <text class="section" x="80" y="155">Host Layer</text>
+  <rect class="box" x="80" y="175" width="300" height="60" fill="#ffffff" stroke="#9bc7ad" />
+  <text class="body" x="100" y="203">USB Ethernet adapter</text>
+  <text class="small" x="250" y="203">physically isolated storage LAN</text>
+  <rect class="box" x="430" y="175" width="300" height="60" fill="#ffffff" stroke="#9bc7ad" />
+  <text class="body" x="450" y="203">`br-storage` bridge</text>
+  <text class="small" x="585" y="203">created by `01-infra-prep.yml` on every node</text>
+  <rect class="box" x="780" y="175" width="300" height="60" fill="#ffffff" stroke="#9bc7ad" />
+  <text class="body" x="800" y="203">Static node `storage_ip`</text>
+  <text class="small" x="970" y="203">kept in `hosts.ini`, no gateway on this subnet</text>
+
+  <rect class="lane" x="50" y="300" width="1100" height="180" fill="#eef2ff" stroke="#7b9acc" />
+  <text class="section" x="80" y="335">Kubernetes Network Layer</text>
+  <rect class="box" x="90" y="360" width="240" height="70" fill="#ffffff" stroke="#95b3e8" />
+  <text class="body" x="110" y="388">Multus</text>
+  <text class="small" x="175" y="388">adds a second interface to selected pods</text>
+  <rect class="box" x="370" y="360" width="240" height="70" fill="#ffffff" stroke="#95b3e8" />
+  <text class="body" x="390" y="388">Whereabouts</text>
+  <text class="small" x="485" y="388">allocates IPs on `storage_network_range`</text>
+  <rect class="box" x="650" y="360" width="240" height="70" fill="#ffffff" stroke="#95b3e8" />
+  <text class="body" x="670" y="388">`storage-network` NAD</text>
+  <text class="small" x="830" y="388">ties bridge + IPAM together in `longhorn-system`</text>
+  <rect class="box" x="930" y="360" width="180" height="70" fill="#ffffff" stroke="#95b3e8" />
+  <text class="body" x="950" y="388">Longhorn setting</text>
+  <text class="small" x="950" y="411">`storageNetwork`</text>
+
+  <rect class="lane" x="50" y="520" width="1100" height="170" fill="#fff4e6" stroke="#d4a373" />
+  <text class="section" x="80" y="555">Storage Workload Layer</text>
+  <rect class="box" x="120" y="580" width="300" height="70" fill="#ffffff" stroke="#e1b685" />
+  <text class="body" x="140" y="608">Longhorn manager / engine pods</text>
+  <text class="small" x="140" y="631">get secondary network attachment for replica traffic</text>
+  <rect class="box" x="450" y="580" width="300" height="70" fill="#ffffff" stroke="#e1b685" />
+  <text class="body" x="470" y="608">Replica traffic stays on storage LAN</text>
+  <text class="small" x="470" y="631">avoids competing with API and ingress traffic</text>
+  <rect class="box" x="780" y="580" width="280" height="70" fill="#ffffff" stroke="#e1b685" />
+  <text class="body" x="800" y="608">PVC-backed apps</text>
+  <text class="small" x="800" y="631">benefit indirectly through Longhorn volumes</text>
+
+  <path class="arrow" d="M 380 205 L 430 205" />
+  <path class="arrow dashed" d="M 730 205 L 780 205" />
+  <path class="arrow" d="M 580 235 L 580 300" />
+  <path class="arrow" d="M 210 430 L 210 580" />
+  <path class="arrow" d="M 490 430 L 490 580" />
+  <path class="arrow" d="M 770 430 L 770 580" />
+  <path class="arrow dashed" d="M 1020 430 L 1020 580" />
+  <path class="arrow" d="M 420 615 L 450 615" />
+  <path class="arrow" d="M 750 615 L 780 615" />
+
+  <text class="small" x="80" y="720">Failure domains: `br-storage` missing -> Multus attach fails. Whereabouts/IPAM broken -> NAD attachment may fail. `storage-ip` mismatch -> Longhorn replication path is wrong.</text>
+</svg>

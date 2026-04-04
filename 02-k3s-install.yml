@@ -1,0 +1,272 @@
+---
+# ============================================================================
+# Raspberry Pi K3s Cluster - K3s Installation Playbook
+# ============================================================================
+#
+# ⚠️  WARNING: This playbook is for INITIAL CLUSTER BOOTSTRAP ONLY!
+#
+# For day-2 operations (adding/removing nodes), use the dedicated playbooks:
+#   - k3s-add-worker.yml     Add worker nodes to existing cluster
+#   - k3s-remove-worker.yml  Remove worker nodes from cluster
+#   - k3s-add-master.yml     Add master nodes for HA
+#   - k3s-remove-master.yml  Remove master nodes from HA cluster
+#
+# Running this playbook on an existing cluster may cause service disruption!
+#
+# ============================================================================
+#
+# This playbook installs K3s on the control plane and worker nodes.
+#
+# Key Configuration Flags:
+# - --cluster-init: Enables embedded etcd for HA control plane
+# - --flannel-backend=none: Disables default Flannel CNI (Cilium will provide CNI)
+# - --disable-network-policy: Disables K3s network policies (Cilium will handle)
+# - --disable-kube-proxy: Disables kube-proxy (Cilium replaces it with eBPF)
+# - --disable servicelb: Disables Klipper LoadBalancer (Cilium L2 will provide)
+# - --disable traefik: Disables default Traefik (we install via Helm for Gateway API)
+#
+# Prerequisites:
+# - Infrastructure prepared (01-infra-prep.yml completed)
+# - USB SSDs mounted at /mnt/ssd
+# - Nodes accessible via SSH
+#
+# Post-Installation:
+# - Nodes will show as "NotReady" until Cilium is installed (03-addons.yml)
+# - Kubeconfig is fetched to ~/.kube/config-rpi and updated with master IP
+#
+# ============================================================================
+
+- name: Safety Check - Prevent Accidental Re-runs
+  hosts: "{{ groups['masters'][0] }}"
+  gather_facts: no
+  become: yes
+  vars:
+    force_reinstall: false
+  tasks:
+    - name: Check if K3s is already running
+      command: systemctl is-active k3s
+      register: k3s_running
+      failed_when: false
+      changed_when: false
+
+    - name: Check if cluster has nodes
+      command: kubectl get nodes
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: cluster_nodes
+      failed_when: false
+      changed_when: false
+      when: k3s_running.rc == 0
+      # The presence of a responding API plus existing nodes means this is not a
+      # first bootstrap anymore; day-2 changes should go through the dedicated playbooks.
+
+    - name: Fail if cluster already exists (unless force_reinstall=true)
+      fail:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ⚠️  CLUSTER ALREADY EXISTS - ABORTING                           ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  K3s is already running on the control plane.                    ║
+          ║  Running this playbook may cause service disruption!             ║
+          ║                                                                  ║
+          ║  For day-2 operations, use the dedicated playbooks:              ║
+          ║    • k3s-add-worker.yml     - Add worker nodes                   ║
+          ║    • k3s-remove-worker.yml  - Remove worker nodes                ║
+          ║    • k3s-add-master.yml     - Add HA master nodes                ║
+          ║    • k3s-remove-master.yml  - Remove master nodes                ║
+          ║                                                                  ║
+          ║  To force reinstall (DESTRUCTIVE), use:                          ║
+          ║    ansible-playbook 02-k3s-install.yml -e force_reinstall=true   ║
+          ╚══════════════════════════════════════════════════════════════════╝
+      when: k3s_running.rc == 0 and not (force_reinstall | bool)
+
+    - name: Display warning for force reinstall
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ⚠️  FORCE REINSTALL MODE - PROCEEDING WITH CAUTION              ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  force_reinstall=true was specified.                             ║
+          ║  This will reinstall K3s on all nodes.                           ║
+          ╚══════════════════════════════════════════════════════════════════╝
+      when: k3s_running.rc == 0 and (force_reinstall | bool)
+
+- name: Install K3s Control Plane
+  hosts: masters
+  become: yes
+  vars:
+    # Critical Fix #1: Added --cluster-init for embedded etcd initialisation
+    # Common flags for control plane
+    k3s_args: >-
+      --cluster-init
+      --data-dir /mnt/ssd/k3s
+      --flannel-backend=none
+      --disable-network-policy
+      --disable-kube-proxy
+      --disable servicelb
+      --disable traefik
+    # These flags intentionally leave networking/inress incomplete until 03-addons.yml.
+    # A NotReady node immediately after this play is expected.
+  tasks:
+    - name: Install K3s on Control Plane
+      shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ k3s_version }} sh -s - server \
+        --tls-san {{ master_ip }} \
+        --tls-san {{ inventory_hostname }} \
+        {{ k3s_args }}
+      args:
+        creates: /mnt/ssd/k3s/server/node-token
+
+    - name: Wait for K3s to be ready
+      command: kubectl get nodes
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: k3s_ready
+      until: k3s_ready.rc == 0
+      retries: 30
+      delay: 10
+
+    - name: Get Node Token
+      command: cat /mnt/ssd/k3s/server/node-token
+      register: node_token
+      changed_when: false
+
+- name: Install K3s Workers
+  hosts: workers
+  become: yes
+  vars:
+    # Workers join with explicit node-name and --with-node-id to avoid
+    # duplicate password/hostname conflicts when rejoining.
+    k3s_args: "--data-dir /mnt/ssd/k3s --with-node-id --node-name {{ inventory_hostname }}"
+  tasks:
+    - name: Wait for control plane node-token to exist
+      stat:
+        path: /mnt/ssd/k3s/server/node-token
+      register: node_token_stat
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      until: node_token_stat.stat.exists
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Get Node Token
+      command: cat /mnt/ssd/k3s/server/node-token
+      register: node_token
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      changed_when: false
+
+    - name: Wait for K3s API to be reachable
+      command: kubectl get --raw=/healthz
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: api_health
+      until: api_health.rc == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+      # Workers depend on the API being live before joining; this keeps failures
+      # readable and avoids half-configured agents.
+
+    - name: Check if node already exists on control plane and is not Ready
+      command: kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: node_ready_status
+      failed_when: false
+      changed_when: false
+
+    - name: Delete stale node from control plane if not Ready
+      command: kubectl delete node {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      when: node_ready_status.rc == 0 and node_ready_status.stdout != 'True'
+      changed_when: true
+
+    - name: Determine whether worker needs recovery
+      set_fact:
+        needs_worker_recovery: "{{ node_ready_status.rc == 0 and node_ready_status.stdout != 'True' }}"
+      # "running but NotReady" is a common bad state after failed joins or CNI churn.
+      # Treat it as recovery, not as a healthy agent, so we actually clean up and rejoin.
+
+    - name: Check current k3s-agent service state
+      command: systemctl is-active k3s-agent
+      register: agent_state
+      failed_when: false
+      changed_when: false
+
+    - name: Stop k3s-agent service if present
+      systemd:
+        name: k3s-agent
+        state: stopped
+      failed_when: false
+      when: agent_state.stdout == 'active' or needs_worker_recovery
+
+    - name: Remove stale node password
+      file:
+        path: /etc/rancher/node
+        state: absent
+      when: agent_state.stdout != 'active' or needs_worker_recovery
+      # K3s stores per-node join identity here. Removing it is often necessary when
+      # reusing a hostname after a failed join or stale registration.
+
+    - name: Remove stale agent data directory
+      file:
+        path: /mnt/ssd/k3s/agent
+        state: absent
+      when: agent_state.stdout != 'active' or needs_worker_recovery
+
+    - name: Install K3s Agent
+      shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ k3s_version }} \
+        K3S_URL=https://{{ master_ip }}:6443 \
+        K3S_TOKEN={{ node_token.stdout }} \
+        K3S_NODE_NAME={{ inventory_hostname }} sh -s - \
+        {{ k3s_args }}
+      when: agent_state.stdout != 'active' or needs_worker_recovery
+
+    # Note: We only verify the k3s-agent service is running, not that the node
+    # is Ready. Nodes won't become Ready until Cilium CNI is installed in
+    # 03-addons.yml (because K3s is installed with --flannel-backend=none)
+    - name: Wait for K3s agent service to be registered
+      command: systemctl list-unit-files k3s-agent.service
+      register: service_check
+      until: service_check.stdout is search('k3s-agent.service')
+      retries: 12
+      delay: 5
+      changed_when: false
+
+    - name: Verify K3s agent is running
+      command: systemctl is-active k3s-agent
+      register: agent_active
+      until: agent_active.rc == 0
+      retries: 10
+      delay: 5
+      changed_when: false
+
+- name: Fetch Kubeconfig to Control Node
+  hosts: "{{ groups['masters'][0] }}"
+  become: yes
+  tasks:
+    - name: Copy kubeconfig to user home
+      fetch:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: ~/.kube/config-rpi
+        flat: yes
+
+    - name: Update kubeconfig server address
+      delegate_to: localhost
+      become: no
+      lineinfile:
+        path: ~/.kube/config-rpi
+        regexp: '^\s+server:\s+https://127\.0\.0\.1:6443'
+        line: "    server: https://{{ master_ip }}:6443"
+        backup: yes
+      # K3s writes 127.0.0.1 into the local kubeconfig; rewrite it so the config
+      # works from the Ansible/control machine without manual editing.

@@ -1,0 +1,227 @@
+---
+# ============================================================================
+# k3s-remove-worker.yml - Remove Worker Nodes from K3s Cluster
+# ============================================================================
+#
+# USAGE: ansible-playbook k3s-remove-worker.yml --limit <node-name>
+#
+# This playbook safely removes worker nodes from a K3s cluster with proper
+# drain and cleanup. The --limit flag is REQUIRED.
+#
+# Examples:
+#   # Remove a worker (keeps data for potential rejoin)
+#   ansible-playbook k3s-remove-worker.yml --limit k3s-wrk-04
+#
+#   # Remove and wipe all K3s data (for decommissioning)
+#   ansible-playbook k3s-remove-worker.yml --limit k3s-wrk-04 -e wipe_data=true
+#
+#   # Force removal of unresponsive node
+#   ansible-playbook k3s-remove-worker.yml --limit k3s-wrk-04 -e force_drain=true
+#
+# Options:
+#   -e wipe_data=true     Remove all K3s data from the node
+#   -e drain_timeout=300  Timeout for draining workloads (default: 300s)
+#   -e force_drain=true   Force drain even with local storage or unresponsive pods
+#   -e skip_drain=true    Skip drain entirely (for already-drained or dead nodes)
+#
+# Safety Features:
+#   - Requires --limit flag (fails without it)
+#   - Cordons node before draining
+#   - Graceful drain with configurable timeout
+#   - Data preserved by default (explicit flag to wipe)
+#
+# ============================================================================
+
+- name: Validate Execution Parameters
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Fail if no --limit specified
+      fail:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ERROR: You must specify --limit to target specific nodes        ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  This playbook requires explicit node targeting to prevent       ║
+          ║  accidental removal of all workers.                              ║
+          ║                                                                  ║
+          ║  Usage:                                                          ║
+          ║    ansible-playbook k3s-remove-worker.yml --limit k3s-wrk-04     ║
+          ║                                                                  ║
+          ║  Options:                                                        ║
+          ║    -e wipe_data=true     Wipe K3s data after removal             ║
+          ║    -e force_drain=true   Force drain unresponsive pods           ║
+          ║    -e drain_timeout=300  Drain timeout in seconds                ║
+          ╚══════════════════════════════════════════════════════════════════╝
+      when: ansible_limit is not defined
+
+- name: Remove Worker Nodes from K3s Cluster
+  hosts: workers
+  become: yes
+  vars:
+    drain_timeout: 300
+    force_drain: false
+    wipe_data: false
+    skip_drain: false
+  tasks:
+    # -------------------------------------------------------------------------
+    # Pre-removal Checks
+    # -------------------------------------------------------------------------
+    - name: Check if node exists in cluster
+      command: kubectl get node {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: node_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Check if k3s-agent service exists
+      command: systemctl list-unit-files k3s-agent.service
+      register: agent_service_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Set node_in_cluster fact
+      set_fact:
+        node_in_cluster: "{{ node_exists.rc == 0 }}"
+        agent_installed: "{{ agent_service_exists.rc == 0 and 'k3s-agent.service' in agent_service_exists.stdout }}"
+
+    - name: Display removal plan
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  Removing {{ inventory_hostname }} from cluster                  ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Node in cluster: {{ 'Yes' if node_in_cluster else 'No' }}
+          ║  Agent installed: {{ 'Yes' if agent_installed else 'No' }}
+          ║  Drain timeout:   {{ drain_timeout }}s
+          ║  Force drain:     {{ force_drain }}
+          ║  Skip drain:      {{ skip_drain }}
+          ║  Wipe data:       {{ wipe_data }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    # -------------------------------------------------------------------------
+    # Cordon and Drain
+    # -------------------------------------------------------------------------
+    - name: Cordon node (prevent new workloads)
+      command: kubectl cordon {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      when: node_in_cluster and not skip_drain
+      failed_when: false
+      changed_when: true
+
+    - name: Drain node workloads
+      command: >
+        kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --timeout={{ drain_timeout }}s
+        {{ '--force' if force_drain else '' }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      when: node_in_cluster and not skip_drain
+      register: drain_result
+      failed_when: false
+      changed_when: drain_result.rc == 0
+
+    - name: Warn if drain failed
+      debug:
+        msg: |
+          ⚠️  WARNING: Drain failed or timed out
+          {{ drain_result.stderr | default('') }}
+          
+          Continuing with removal. Some pods may be forcefully terminated.
+          Use -e force_drain=true to force drain, or -e skip_drain=true to skip.
+      when: node_in_cluster and not skip_drain and drain_result.rc != 0
+
+    # -------------------------------------------------------------------------
+    # Stop and Uninstall K3s Agent
+    # -------------------------------------------------------------------------
+    - name: Stop k3s-agent service
+      systemd:
+        name: k3s-agent
+        state: stopped
+      when: agent_installed
+      failed_when: false
+
+    - name: Check for k3s-agent-uninstall script
+      stat:
+        path: /usr/local/bin/k3s-agent-uninstall.sh
+      register: uninstall_script
+
+    - name: Uninstall K3s agent
+      command: /usr/local/bin/k3s-agent-uninstall.sh
+      when: uninstall_script.stat.exists
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # Remove Node from Cluster
+    # -------------------------------------------------------------------------
+    - name: Delete node from cluster
+      command: kubectl delete node {{ inventory_hostname }} --grace-period=60
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      when: node_in_cluster
+      register: delete_result
+      failed_when: false
+      changed_when: delete_result.rc == 0
+
+    - name: Verify node removed from cluster
+      command: kubectl get node {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: verify_removed
+      failed_when: false
+      changed_when: false
+
+    - name: Confirm node removal
+      debug:
+        msg: "{{ '✓ Node removed from cluster' if verify_removed.rc != 0 else '⚠️ Node still exists in cluster' }}"
+
+    # -------------------------------------------------------------------------
+    # Optional: Wipe K3s Data
+    # -------------------------------------------------------------------------
+    - name: Remove K3s data directory
+      file:
+        path: /mnt/ssd/k3s
+        state: absent
+      when: wipe_data | bool
+
+    - name: Remove K3s configuration directory
+      file:
+        path: /etc/rancher
+        state: absent
+      when: wipe_data | bool
+
+    - name: Data wipe status
+      debug:
+        msg: "{{ '✓ K3s data wiped from node' if wipe_data else 'ℹ️  K3s data preserved (use -e wipe_data=true to remove)' }}"
+
+    # -------------------------------------------------------------------------
+    # Final Status
+    # -------------------------------------------------------------------------
+    - name: Display completion message
+      debug:
+        msg: |
+          
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  ✓ Successfully removed {{ inventory_hostname }}                 ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Node has been:                                                  ║
+          ║    {{ '✓' if node_in_cluster else '○' }} Cordoned and drained
+          ║    {{ '✓' if agent_installed else '○' }} K3s agent uninstalled
+          ║    {{ '✓' if node_in_cluster else '○' }} Removed from cluster
+          ║    {{ '✓' if wipe_data else '○' }} Data wiped
+          ║                                                                  ║
+          ║  {{ 'Remember to remove/comment the node in hosts.ini' if not wipe_data else 'Node fully decommissioned' }}
+          ║                                                                  ║
+          ║  Verify with: kubectl get nodes                                  ║
+          ╚══════════════════════════════════════════════════════════════════╝

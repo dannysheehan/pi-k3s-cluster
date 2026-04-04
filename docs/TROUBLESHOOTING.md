@@ -160,12 +160,22 @@ kubectl get svc -n traefik traefik
 3. Whereabouts allocates IPs on the storage subnet.
 4. `03-addons.yml` creates the `storage-network` NAD in `longhorn-system`.
 5. Longhorn uses `storageNetwork` plus node `storage-ip` annotations for replication traffic.
+6. `03-addons.yml` also sets `spec.tags: ["storage-network"]` on every worker
+   Longhorn node CR. These tags are **never auto-populated** by Longhorn — they
+   must be set explicitly (see
+   [Storage Tags docs](https://longhorn.io/docs/archives/1.5.5/volumes-and-nodes/storage-tags/)).
 
 Useful checks:
 ```bash
 kubectl get network-attachment-definition -n longhorn-system storage-network -o yaml
-kubectl get nodes.longhorn.io -n longhorn-system -o yaml | grep storage-ip -n
+kubectl get nodes.longhorn.io -n longhorn-system -o yaml | grep storage-ip
+kubectl get nodes.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.tags}{"\n"}{end}'
 ansible all -a "ip addr show br-storage"
+```
+
+If a new node shows blank in the Longhorn UI "storage-network" column, rerun:
+```bash
+ansible-playbook 03-addons.yml --tags longhorn
 ```
 
 ## Quick Failure Isolation

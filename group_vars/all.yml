@@ -16,6 +16,8 @@ traefik_version: "30.1.0"
 multus_version: "v4.1.3"
 whereabouts_version: "v0.9.3"
 longhorn_control_plane_allow_scheduling: false
+longhorn_node_tags:
+  - storage-network
 workload_node_label_key: "pi-cluster.io/workload-node"
 workload_node_label_value: "true"
 

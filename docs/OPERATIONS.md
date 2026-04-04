@@ -226,6 +226,23 @@ Dependencies:
 - node `storage-ip` annotations
 - worker nodes available for replica scheduling
 
+Storage tags:
+- Longhorn node tags (`spec.tags` on `nodes.longhorn.io` CRs) are **purely
+  manual** — Longhorn never auto-populates them. They can be set via the UI
+  (Node → Edit Node and Disks → +New Node Tag) or via `kubectl patch`.
+- This cluster tags every worker node with `storage-network` so that
+  StorageClass `nodeSelector` rules can target nodes on the dedicated storage
+  network. The tag list is controlled by `longhorn_node_tags` in
+  `group_vars/all.yml`.
+- `03-addons.yml` applies the tags automatically (idempotent). When adding a
+  new worker, rerunning `ansible-playbook 03-addons.yml --tags longhorn` is
+  enough to tag the new node.
+- Tags have **no effect on existing replicas** — they only influence future
+  scheduling decisions.
+- Upstream reference:
+  [Storage Tags (Longhorn docs)](https://longhorn.io/docs/archives/1.5.5/volumes-and-nodes/storage-tags/)
+  (removed from v1.6+ docs but the feature still works identically).
+
 Operational policy:
 - the control-plane node is reserved for Kubernetes and cluster-service work
 - Longhorn storage scheduling is worker-only in this repo

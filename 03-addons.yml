@@ -583,6 +583,34 @@
         - longhorn_nodes.resources is defined
         - matched_storage_ip != ''
         - (item.metadata.annotations | default({})).get('longhorn.io/storage-ip', '') != matched_storage_ip
+      register: annotate_result
+      until: annotate_result is not failed
+      retries: 6
+      delay: 10
+      tags: [longhorn, storage]
+
+    - name: Tag Longhorn worker nodes with storage-network
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Node
+        api_version: longhorn.io/v1beta2
+        name: "{{ item.metadata.name }}"
+        namespace: longhorn-system
+        definition:
+          spec:
+            tags: "{{ longhorn_node_tags }}"
+      loop: "{{ longhorn_nodes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when:
+        - longhorn_nodes.resources is defined
+        - item.metadata.name not in control_plane_k8s_node_names
+        - (item.spec.tags | default([])) | sort != (longhorn_node_tags | sort)
+      register: tag_result
+      until: tag_result is not failed
+      retries: 6
+      delay: 10
       tags: [longhorn, storage]
 
     - name: Disable Longhorn scheduling on control-plane nodes

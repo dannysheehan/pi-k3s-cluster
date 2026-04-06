@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What This Repo Is
 
 Ansible playbooks for deploying and managing a K3s cluster on Raspberry Pi 4 hardware. The cluster runs:
-- **K3s** (1 control plane + 3 workers) with default networking stack disabled
+- **K3s** (1 control plane + 4 workers) with default networking stack disabled
 - **Cilium** as CNI + kube-proxy replacement + L2 LoadBalancer
 - **Multus + Whereabouts** for secondary storage network attachments
 - **Longhorn** for distributed block storage on USB SSDs
@@ -87,9 +87,23 @@ The cluster has four layers that must be deployed in order and diagnosed bottom-
 - K3s data: `/mnt/ssd/k3s`; Longhorn volumes: `/mnt/ssd/longhorn`; entire `/var` is bind-mounted from `/mnt/ssd/var`
 - Storage replication traffic uses a dedicated network (`192.168.10.0/24`) via USB Ethernet adapters, isolated from application traffic
 
-## Multus / Whereabouts Upgrade Note
+## Storage NAD: Bridge, Not ipvlan
 
-These are deployed via pinned manifests in `03-addons.yml` with a custom patch applied to `kube-multus-ds`. Do **not** apply raw upstream manifests directly — always upgrade by changing the version variable and rerunning the playbook with `--tags multus,whereabouts`.
+The `storage-network` NetworkAttachmentDefinition uses `type: bridge` (veth pairs via `br-storage`), **not** `ipvlan`. Longhorn's iSCSI initiator runs in the host network namespace via `nsenter`; ipvlan L2 has a kernel limitation where the host cannot reach its own pod's ipvlan address, which causes iSCSI "No route to host" during volume discovery. Do not switch this back to ipvlan.
+
+## Multus Patch Details
+
+The Multus DaemonSet patch in `03-addons.yml` does **not** just reapply the upstream manifest — it also:
+
+- Sets `securityContext: privileged: true` on both the init container and main container
+- Adds `mountPropagation: HostToContainer` on `hostroot`, `host-run-netns`, and `host-var-lib-kubelet` mounts — this ensures new nsfs bind mounts created by containerd on the host propagate into the Multus container so Cilium CNI can enter pod network namespaces
+- Uses `install_multus -t thick` in the init container
+
+Do **not** apply raw upstream manifests directly — always upgrade by changing `multus_version` in `group_vars/all.yml` and rerunning with `--tags multus,whereabouts`.
+
+## Longhorn Node Tags
+
+The playbook explicitly sets `spec.tags: ["storage-network"]` on every worker Longhorn node CR (via the `longhorn_node_tags` variable in `group_vars/all.yml`). Longhorn does **not** auto-populate these tags — if they are missing, the storage network column in the Longhorn UI will be blank and replication may not use the dedicated network. If a new node is added and tags are missing, rerun `--tags longhorn`.
 
 ## Operational Docs
 

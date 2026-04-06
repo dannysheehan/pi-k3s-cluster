@@ -2,6 +2,8 @@
 
 Automated deployment of a production-grade K3s cluster on Raspberry Pi 4 devices using Ansible.
 
+![Pi cluster with dedicated storage network cabling](docs/assets/pi-cluster-with-storage-network.png)
+
 ## Architecture Overview
 
 This setup creates a resilient Kubernetes cluster with:
@@ -455,3 +457,7 @@ For recovery procedures, see [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md).
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+---
+
+> This repository was created with the assistance of AI (Claude by Anthropic).

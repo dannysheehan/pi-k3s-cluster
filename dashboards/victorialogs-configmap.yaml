@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: victorialogs-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  victorialogs.json: |
+    {
+      "id": null,
+      "uid": "victorialogs-k8s",
+      "title": "Kubernetes Logs",
+      "tags": ["logs", "kubernetes", "victorialogs"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": {"from": "now-1h", "to": "now"},
+      "templating": {
+        "list": [
+          {
+            "name": "filter",
+            "label": "LogsQL Filter",
+            "type": "textbox",
+            "current": {"text": "*", "value": "*"},
+            "hide": 0,
+            "query": "*",
+            "description": "LogsQL filter expression. Examples: * | kubernetes.namespace_name:monitoring | kubernetes.pod_name:grafana* | error"
+          },
+          {
+            "name": "datasource",
+            "label": "Datasource",
+            "type": "datasource",
+            "pluginId": "victoriametrics-logs-datasource",
+            "current": {},
+            "hide": 2
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Log volume by namespace",
+          "type": "timeseries",
+          "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+          "datasource": {"type": "victoriametrics-logs-datasource", "uid": "victorialogs"},
+          "targets": [
+            {
+              "expr": "*",
+              "legendFormat": "Total",
+              "queryType": "hits"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {"lineWidth": 1, "fillOpacity": 10, "drawStyle": "bars"}
+            }
+          }
+        },
+        {
+          "id": 2,
+          "title": "Logs",
+          "type": "logs",
+          "gridPos": {"h": 24, "w": 24, "x": 0, "y": 6},
+          "datasource": {"type": "victoriametrics-logs-datasource", "uid": "victorialogs"},
+          "targets": [
+            {
+              "expr": "$filter",
+              "queryType": "range",
+              "maxLines": 500
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": true,
+            "showCommonLabels": false,
+            "wrapLogMessage": false,
+            "prettifyLogMessage": false,
+            "enableLogDetails": true,
+            "sortOrder": "Descending",
+            "dedupStrategy": "none"
+          }
+        }
+      ]
+    }

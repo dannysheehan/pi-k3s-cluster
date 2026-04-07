@@ -17,8 +17,10 @@ Think of the cluster as four stacked layers:
    and stores cluster state on SSD-backed storage.
 3. Cluster services: Cilium, Multus, Whereabouts, Longhorn, and Traefik extend
    the cluster with networking, storage, and ingress behavior.
-4. Observability: VictoriaMetrics, VMAgent, Node Exporter, and Grafana make it
-   possible to see whether the lower layers are healthy.
+4. Observability: VictoriaMetrics, VMAgent, Node Exporter, VictoriaLogs,
+   Fluent Bit, and Grafana make it possible to see whether the lower layers
+   are healthy. Metrics and logs run in the same `monitoring` namespace and
+   are both queried through Grafana.
 
 If a higher layer is broken, start by checking the layer immediately below it.
 For example, if Grafana is empty, verify VMAgent and VictoriaMetrics before
@@ -139,11 +141,17 @@ Normal:
 - `vmagent` may take a short while to show full target discovery
 - dashboards can stay sparse until traffic exists
 - Hubble-specific metrics can remain empty until matching flows occur
+- Fluent Bit DaemonSet starts immediately but VictoriaLogs may take 30–60 s
+  before the first logs are queryable
 
 Suspicious:
 - `vmagent` is repeatedly `OOMKilled`
 - VictoriaMetrics is ready but expected series never appear
 - Grafana is up but every dashboard remains empty even though smoke tests pass
+- VictoriaLogs is running but Grafana Logs panel is empty — check Fluent Bit
+  for errors and verify the `_msg` rename filter is present (see RUNBOOKS.md #10)
+- Grafana pod stuck `Pending` after a rerun — the `grafana` PVC may be missing
+  (see RUNBOOKS.md #11)
 
 ## Component Relationships
 
@@ -281,21 +289,36 @@ Things that depend on Traefik:
 
 ### VictoriaMetrics Stack
 
-The monitoring stack has three distinct roles:
+The monitoring stack covers both metrics and logs:
 
-- Node Exporter: exports node metrics
-- VMAgent: discovers and scrapes targets
-- VictoriaMetrics Single: stores metrics and answers queries
-- Grafana: renders dashboards against VictoriaMetrics
+- Node Exporter: exports node-level metrics
+- VMAgent: discovers and scrapes targets, remote-writes to VictoriaMetrics
+- VictoriaMetrics Single (`vmsingle`): stores metrics, answers PromQL/MetricsQL queries
+- VictoriaLogs Single (`vlogs`): stores logs, answers LogsQL queries
+- Fluent Bit: DaemonSet that tails container logs and forwards to VictoriaLogs
+- Grafana: renders metric dashboards and log dashboards from both backends
 
 Dependencies:
 - working pod scheduling
-- working storage for `vmsingle` and Grafana
+- working Longhorn storage for `vmsingle`, `vlogs`, and Grafana PVCs
 - working internal service networking
 
-Important relationship:
-- Empty Grafana panels do not automatically mean exporters are broken. The
-  issue can be at the exporter, scrape, storage, query, or dashboard layer.
+Important relationships:
+- Empty Grafana metric panels do not mean exporters are broken. The issue can
+  be at the exporter, scrape, storage, query, or dashboard layer.
+- Empty Grafana log panels do not mean Fluent Bit is broken. Diagnose bottom-up:
+  Fluent Bit → VictoriaLogs ingest → Grafana datasource uid → dashboard panel query.
+- VictoriaLogs **requires `_msg`** as the field name for the log message body.
+  Fluent Bit sends it as `log`. The Fluent Bit `[FILTER] modify / Rename log _msg`
+  block in the Helm values is essential — without it, logs are stored silently
+  without message text and all queries return empty results.
+- The Grafana `victoriametrics-logs-datasource` plugin must be provisioned with
+  an **explicit `uid: victorialogs`** so that dashboard panels can reference it
+  by a stable uid. Without this, hardcoded datasource references in dashboard
+  JSON resolve to "No Datasource found".
+- LogsQL is **not** PromQL. Aggregation syntax like `count() by (field)` from
+  PromQL is invalid in LogsQL. Dashboard panels using the `hits` queryType
+  expect a plain LogsQL filter expression (e.g. `*`, `kubernetes.namespace_name:monitoring`).
 
 ## Networking Model
 
@@ -555,7 +578,10 @@ ansible-playbook 03-addons.yml --tags cilium
 ansible-playbook 03-addons.yml --tags multus,whereabouts
 ansible-playbook 03-addons.yml --tags longhorn
 ansible-playbook 03-addons.yml --tags traefik
+ansible-playbook 04-monitoring.yml --tags vmsingle
+ansible-playbook 04-monitoring.yml --tags victorialogs
 ansible-playbook 04-monitoring.yml --tags vmagent
+ansible-playbook 04-monitoring.yml --tags fluent-bit
 ansible-playbook 04-monitoring.yml --tags grafana
 ansible-playbook 04-monitoring.yml --tags verification
 ```

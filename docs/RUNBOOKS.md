@@ -263,3 +263,130 @@ After any repair, this is a good minimum confirmation set:
 ./scripts/verify-cluster.sh
 ansible-playbook 04-monitoring.yml --tags verification
 ```
+
+## 10. Grafana Logs Show No Data (`_msg` Field Missing)
+
+Symptom: VictoriaLogs is running and Fluent Bit pods are healthy, but the
+Grafana Logs panel is empty or shows log entries with no message text.
+
+### Root cause
+
+VictoriaLogs requires the log message to be in a field named `_msg`. Fluent
+Bit's Kubernetes tail input stores the raw log line in a field named `log`.
+Without an explicit rename, VictoriaLogs accepts the entries but stores them
+without a message body — every LogsQL query returns results with no visible
+text.
+
+### Verification
+
+```bash
+# Should return entries; check for _msg key in the output
+kubectl exec -n monitoring vlogs-victoria-logs-single-server-0 -- \
+  wget -qO- 'http://127.0.0.1:9428/select/logsql/query?query=*&limit=1'
+```
+
+If output contains `"_msg":""` or no `_msg` key at all, the filter is missing.
+
+### Recovery
+
+Verify the Fluent Bit ConfigMap (managed by the Helm chart values in
+`04-monitoring.yml`) contains this filter block between the Kubernetes filter
+and the Loki output:
+
+```
+[FILTER]
+    Name    modify
+    Match   kube.*
+    Rename  log _msg
+```
+
+Reapply:
+
+```bash
+ansible-playbook 04-monitoring.yml --tags fluent-bit
+```
+
+Wait ~30 seconds for the DaemonSet to roll out, then re-verify.
+
+## 11. Grafana Pod Stuck `Pending` — PVC Not Found
+
+Symptom: After a `--tags grafana` rerun, the Grafana pod stays `Pending` with
+an event like `persistentvolumeclaim "grafana" not found`.
+
+### Root cause
+
+The Grafana Helm chart is configured with `persistence.existingClaim: grafana`.
+If the `grafana` PVC was deleted (e.g. by force-deleting a stuck pod while
+Longhorn held the volume), Helm upgrade succeeds but the pod cannot start
+because the PVC no longer exists.
+
+### Verification
+
+```bash
+kubectl get pvc -n monitoring
+# grafana PVC should appear; if absent, it needs to be recreated
+```
+
+### Recovery
+
+Recreate the PVC manually (Helm will adopt the pre-existing claim on next
+upgrade):
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi
+EOF
+```
+
+Then wait for Longhorn to provision the volume and the pod to start:
+
+```bash
+kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana -w
+```
+
+### Prevention
+
+`04-monitoring.yml` includes an explicit `kubernetes.core.k8s` task that
+ensures the `grafana` PVC exists before the Helm install/upgrade runs. This
+means `--tags grafana` reruns are safe even if the PVC was previously deleted.
+
+## 12. VictoriaLogs PVC Stuck in `Terminating`
+
+Symptom: `kubectl get pvc -n monitoring` shows the VictoriaLogs volume
+(`server-volume-vlogs-victoria-logs-single-server-0`) stuck in `Terminating`.
+
+### Root cause
+
+Longhorn uses a finalizer on PVCs associated with active volumes. The PVC will
+not be fully deleted until the Longhorn volume is detached and cleaned up. This
+can take several minutes after a force-delete.
+
+### Recovery
+
+First, wait 5 minutes to see if it self-resolves. If it is still stuck:
+
+```bash
+# Check if the Longhorn volume itself is gone
+kubectl get volumes.longhorn.io -n longhorn-system | grep vlogs
+
+# If the PVC finalizer is the only thing blocking deletion:
+kubectl patch pvc server-volume-vlogs-victoria-logs-single-server-0 \
+  -n monitoring \
+  -p '{"metadata":{"finalizers":null}}' --type=merge
+```
+
+Once the PVC is gone, redeploy VictoriaLogs to get a fresh volume:
+
+```bash
+ansible-playbook 04-monitoring.yml --tags victorialogs
+```

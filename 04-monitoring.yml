@@ -13,9 +13,11 @@
 #
 # Components installed:
 # 1. Victoria Metrics Single (time-series database)
-# 2. VMAgent (metrics scraper)
-# 3. Grafana (dashboards)
-# 4. Node Exporter (host metrics)
+# 2. VictoriaLogs Single (log storage backend)
+# 3. VMAgent (metrics scraper)
+# 4. Fluent Bit (log shipper DaemonSet)
+# 5. Grafana (dashboards — metrics via VictoriaMetrics, logs via VictoriaLogs)
+# 6. Node Exporter (host metrics)
 #
 # Prerequisites:
 # - K3s cluster with add-ons installed (03-addons.yml completed)
@@ -25,11 +27,13 @@
 #
 # Access after deployment:
 # - Grafana: http://192.168.1.200/grafana (admin / admin)
-# - Victoria Metrics: kubectl port-forward -n monitoring svc/vmsingle 8428:8428
+#   Datasources: VictoriaMetrics (default) + VictoriaLogs
+# - Victoria Metrics: kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
+# - VictoriaLogs:     kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428
 #
 # ============================================================================
 
-- name: Install Victoria Metrics Monitoring Stack
+- name: Install Victoria Metrics + VictoriaLogs Monitoring Stack
   hosts: localhost
   connection: local
   vars:
@@ -139,19 +143,33 @@
       kubernetes.core.helm_repository:
         name: vm
         repo_url: "https://victoriametrics.github.io/helm-charts/"
-      tags: [monitoring, repositories]
+      tags: [monitoring, repositories, vmsingle, victorialogs, vmagent]
 
     - name: Add Grafana Helm Repo
       kubernetes.core.helm_repository:
         name: grafana
         repo_url: "https://grafana.github.io/helm-charts"
-      tags: [monitoring, repositories]
+      tags: [monitoring, repositories, grafana]
 
     - name: Add Prometheus Community Helm Repo (for node-exporter)
       kubernetes.core.helm_repository:
         name: prometheus-community
         repo_url: "https://prometheus-community.github.io/helm-charts"
-      tags: [monitoring, repositories]
+      tags: [monitoring, repositories, node_exporter]
+
+    - name: Add Fluent Helm Repo (for fluent-bit)
+      kubernetes.core.helm_repository:
+        name: fluent
+        repo_url: "https://fluent.github.io/helm-charts"
+      tags: [monitoring, repositories, fluent-bit]
+
+    # helm_repository adds repo config but does NOT fetch the chart index.
+    # helm repo update is required so subsequent helm install/upgrade tasks
+    # can resolve chart versions without a "no chart version found" error.
+    - name: Update Helm repo indexes
+      ansible.builtin.command: helm repo update vm grafana prometheus-community fluent
+      changed_when: false
+      tags: [monitoring, repositories, vmsingle, victorialogs, vmagent, node_exporter, grafana, fluent-bit]
 
     # ========================================================================
     # NODE EXPORTER - Host metrics
@@ -206,6 +224,52 @@
               search.maxConcurrentRequests: 2
               search.maxQueueDuration: 30s
       tags: [monitoring, vmsingle]
+
+    # ========================================================================
+    # VICTORIALOGS SINGLE - Log storage backend
+    # ========================================================================
+    - name: Install VictoriaLogs Single
+      kubernetes.core.helm:
+        name: vlogs
+        chart_ref: vm/victoria-logs-single
+        chart_version: "{{ victorialogs_chart_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 300s
+        values:
+          server:
+            retentionPeriod: "{{ victorialogs_retention }}"
+            persistentVolume:
+              enabled: true
+              storageClassName: "{{ storage_class }}"
+              size: "{{ victorialogs_storage_size }}"
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+      tags: [monitoring, victorialogs]
+
+    # Note: VictoriaLogs Single uses a StatefulSet, not a Deployment
+    - name: Wait for VictoriaLogs to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: StatefulSet
+        namespace: monitoring
+        name: vlogs-victoria-logs-single-server
+      register: vlogs_sts
+      until: >
+        vlogs_sts.resources is defined and
+        vlogs_sts.resources | length > 0 and
+        (vlogs_sts.resources[0].status.readyReplicas | default(0)) ==
+        (vlogs_sts.resources[0].status.replicas | default(1))
+      retries: 30
+      delay: 10
+      ignore_errors: true
+      tags: [monitoring, victorialogs]
 
     # ========================================================================
     # VMAGENT - Metrics scraper
@@ -467,6 +531,72 @@
       tags: [monitoring, vmagent]
 
     # ========================================================================
+    # FLUENT BIT - Log shipper DaemonSet
+    # ========================================================================
+    - name: Install Fluent Bit
+      kubernetes.core.helm:
+        name: fluent-bit
+        chart_ref: fluent/fluent-bit
+        chart_version: "{{ fluent_bit_chart_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 300s
+        values:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          config:
+            # Tail all container logs written by containerd (CRI format)
+            inputs: |
+              [INPUT]
+                  Name              tail
+                  Path              /var/log/containers/*.log
+                  multiline.parser  cri
+                  Tag               kube.*
+                  Mem_Buf_Limit     5MB
+                  Skip_Long_Lines   On
+                  Refresh_Interval  10
+            # Enrich log lines with Kubernetes pod/namespace/container metadata
+            filters: |
+              [FILTER]
+                  Name                kubernetes
+                  Match               kube.*
+                  Kube_URL            https://kubernetes.default.svc:443
+                  Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+                  Kube_Tag_Prefix     kube.var.log.containers.
+                  Merge_Log           On
+                  K8S-Logging.Parser  On
+                  K8S-Logging.Exclude Off
+
+              # VictoriaLogs requires the message to be in the '_msg' field.
+              # The Kubernetes filter stores the log line in 'log'; rename it
+              # before shipping so Grafana's VictoriaLogs datasource can
+              # display the message body correctly.
+              [FILTER]
+                  Name    modify
+                  Match   kube.*
+                  Rename  log _msg
+            # Ship logs to VictoriaLogs via its Loki-compatible ingest endpoint
+            outputs: |
+              [OUTPUT]
+                  Name              loki
+                  Match             kube.*
+                  Host              vlogs-victoria-logs-single-server.monitoring.svc
+                  Port              9428
+                  URI               /insert/loki/api/v1/push
+                  Labels            job=fluent-bit
+                  auto_kubernetes_labels on
+                  Tls               Off
+                  Line_Format       json
+      tags: [monitoring, fluent-bit]
+
+    # ========================================================================
     # GRAFANA - Dashboards
     # ========================================================================
     - name: Install Grafana
@@ -499,6 +629,11 @@
             limits:
               cpu: 200m
               memory: 256Mi
+          # Third-party plugins to install on Grafana startup.
+          # Requires outbound internet access from the monitoring namespace on
+          # first install — the pod downloads plugins from grafana.com.
+          plugins:
+            - victoriametrics-logs-datasource
           # Configure for sub-path access
           grafana.ini:
             server:
@@ -516,6 +651,13 @@
                   url: http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428
                   access: proxy
                   isDefault: true
+                - name: VictoriaLogs
+                  type: victoriametrics-logs-datasource
+                  uid: victorialogs
+                  url: http://vlogs-victoria-logs-single-server.monitoring.svc:9428
+                  access: proxy
+                  jsonData:
+                    maxLines: 1000
           # Dashboard providers
           dashboardProviders:
             dashboardproviders.yaml:
@@ -537,6 +679,14 @@
                   editable: true
                   options:
                     path: /var/lib/grafana/dashboards/infrastructure
+                - name: logs
+                  orgId: 1
+                  folder: 'Logs'
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/logs
           # Pre-provision community dashboards
           dashboards:
             default:
@@ -610,6 +760,13 @@
         src: "{{ playbook_dir }}/dashboards/cilium-overview-configmap.yaml"
       tags: [monitoring, grafana]
 
+    - name: Create VictoriaLogs Kubernetes Logs dashboard ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        src: "{{ playbook_dir }}/dashboards/victorialogs-configmap.yaml"
+      tags: [monitoring, grafana, victorialogs]
+
     # ========================================================================
     # VERIFICATION
     # ========================================================================
@@ -660,6 +817,43 @@
         - item.stdout is search('"data":\\[\\]')
       tags: [monitoring, verification]
 
+    - name: Get Fluent Bit pods for VictoriaLogs smoke test
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        namespace: monitoring
+        label_selectors:
+          - app.kubernetes.io/name=fluent-bit
+      register: fluent_bit_pods
+      changed_when: false
+      tags: [monitoring, verification]
+
+    # Query VictoriaLogs from the vmagent pod (which has wget) to confirm
+    # that Fluent Bit has successfully shipped at least one log entry.
+    - name: Query VictoriaLogs for recently ingested logs
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: monitoring
+        pod: "{{ vmagent_pods_ready.resources[0].metadata.name }}"
+        command: >-
+          sh -c "wget -qO- 'http://vlogs-victoria-logs-single-server.monitoring.svc:9428/select/logsql/query?query=*&limit=1'"
+      register: vlogs_smoke_test
+      changed_when: false
+      failed_when: false
+      when:
+        - vmagent_pods_ready.resources | default([]) | length > 0
+      tags: [monitoring, verification]
+
+    - name: Report VictoriaLogs ingest status
+      ansible.builtin.debug:
+        msg: >-
+          VictoriaLogs smoke test: {{ 'logs ingested successfully' if
+          (vlogs_smoke_test.stdout | default('')) | length > 10
+          else 'no logs yet — Fluent Bit may still be starting up; check
+          kubectl logs -n monitoring -l app.kubernetes.io/name=fluent-bit' }}
+      when: vlogs_smoke_test is not skipped
+      tags: [monitoring, verification]
+
     - name: Wait for Grafana to be ready
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
@@ -687,10 +881,15 @@
             URL: http://192.168.1.200/grafana
             Username: admin
             Password: {{ grafana_admin_password }}
+            Datasources: VictoriaMetrics (default) + VictoriaLogs
           
           Victoria Metrics (port-forward):
             kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
             Then access: http://localhost:8428
+          
+          VictoriaLogs (port-forward):
+            kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428
+            Then access: http://localhost:9428/select/logsql/query?query=*&limit=10
           
           Pre-installed Dashboards:
             - Node Exporter Full (ID: 1860)
@@ -702,10 +901,11 @@
           
           Storage:
             - Victoria Metrics: {{ vm_storage_size }} ({{ vm_retention }} retention)
-            - Grafana: {{ grafana_storage_size }}
+            - VictoriaLogs:     {{ victorialogs_storage_size }} ({{ victorialogs_retention }} retention)
+            - Grafana:          {{ grafana_storage_size }}
           
           Resource Usage (Total):
-            - CPU Requests: ~400m
-            - Memory Requests: ~480Mi
+            - CPU Requests: ~500m
+            - Memory Requests: ~896Mi
             - Much lighter than kube-prometheus-stack!
           ============================================================

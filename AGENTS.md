@@ -23,7 +23,9 @@ ansible-playbook 03-addons.yml --tags multus,whereabouts
 ansible-playbook 03-addons.yml --tags longhorn
 ansible-playbook 03-addons.yml --tags traefik
 ansible-playbook 04-monitoring.yml --tags vmsingle
+ansible-playbook 04-monitoring.yml --tags victorialogs
 ansible-playbook 04-monitoring.yml --tags vmagent
+ansible-playbook 04-monitoring.yml --tags fluent-bit
 ansible-playbook 04-monitoring.yml --tags grafana
 ```
 
@@ -75,6 +77,7 @@ All component versions are in `group_vars/all.yml` (`k3s_version`, `cilium_versi
 
 ## Diagnose Bottom-Up
 - Grafana empty? Check exporter → VMAgent logs → VictoriaMetrics → dashboard query
+- Grafana logs missing? Check Fluent Bit logs → VictoriaLogs ingest → VictoriaLogs datasource in Grafana
 - Longhorn stuck? Check Multus/Whereabouts → storage NAD → node `storage-ip` annotations
 - Nodes NotReady after K3s install? Expected until Cilium runs
 

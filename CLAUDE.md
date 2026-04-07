@@ -10,7 +10,11 @@ Ansible playbooks for deploying and managing a K3s cluster on Raspberry Pi 4 har
 - **Multus + Whereabouts** for secondary storage network attachments
 - **Longhorn** for distributed block storage on USB SSDs
 - **Traefik** for ingress (both IngressRoute CRD and Gateway API)
-- **VictoriaMetrics + Grafana** for monitoring
+- **VictoriaMetrics + VictoriaLogs + Grafana** for metrics+logs observability
+  - VictoriaMetrics: metrics TSDB (PromQL compatible)
+  - VictoriaLogs: log storage (LogsQL, Loki-compatible ingest)
+  - Fluent Bit: log shipper DaemonSet on all nodes
+  - Grafana: unified dashboards for both metrics and logs
 
 ## Environment Setup
 
@@ -44,7 +48,9 @@ ansible-playbook 03-addons.yml --tags traefik
 
 # Targeted rerun of monitoring components (04-monitoring.yml)
 ansible-playbook 04-monitoring.yml --tags vmsingle
+ansible-playbook 04-monitoring.yml --tags victorialogs
 ansible-playbook 04-monitoring.yml --tags vmagent
+ansible-playbook 04-monitoring.yml --tags fluent-bit
 ansible-playbook 04-monitoring.yml --tags grafana
 ansible-playbook 04-monitoring.yml --tags verification
 

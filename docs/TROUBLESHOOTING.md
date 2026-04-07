@@ -165,6 +165,8 @@ kubectl exec -n monitoring vlogs-victoria-logs-single-server-0 -- \
   wget -qO- 'http://127.0.0.1:9428/select/logsql/query?query=*&limit=1' | grep _msg
 ```
 
+Web UI: **http://192.168.1.200/victorialogs/select/vmui/** (exposed via Traefik IngressRoute + StripPrefix middleware)
+
 ### Fluent Bit
 - Log collection DaemonSet running on every worker node.
 - Tails `/var/log/containers/*.log` and enriches entries with Kubernetes metadata.

@@ -25,6 +25,13 @@ This setup creates a resilient Kubernetes cluster with:
 - **Storage Network**: Dedicated USB Ethernet network for Longhorn replication via bridge CNI
 - **Default Storage Class**: Longhorn with replication across nodes
 
+### Observability Stack
+- **VictoriaMetrics Single**: Metrics TSDB (PromQL/MetricsQL compatible, ~400MB vs ~1.2GB for kube-prometheus-stack)
+- **VMAgent**: Lightweight metrics scraper and remote-writer
+- **VictoriaLogs Single**: Log storage backend (LogsQL compatible, Loki-compatible ingest)
+- **Fluent Bit**: DaemonSet log collector — tails container logs and forwards to VictoriaLogs
+- **Grafana**: Unified dashboards for both metrics and logs
+
 All component versions are pinned in [`group_vars/all.yml`](group_vars/all.yml).
 
 ## Quick Start
@@ -181,7 +188,7 @@ pi-cluster/
 ├── 01-infra-prep.yml         # Infrastructure playbook
 ├── 02-k3s-install.yml        # K3s installation (initial bootstrap only)
 ├── 03-addons.yml             # Cluster add-ons (Cilium, Multus, Longhorn, Traefik)
-├── 04-monitoring.yml         # VictoriaMetrics + Grafana monitoring stack
+├── 04-monitoring.yml         # VictoriaMetrics + VictoriaLogs + Fluent Bit + Grafana
 ├── k3s-add-worker.yml        # Add worker nodes to existing cluster
 ├── k3s-remove-worker.yml     # Remove worker nodes from cluster
 ├── k3s-add-master.yml        # Add master nodes for HA
@@ -241,10 +248,12 @@ ansible-playbook 03-addons.yml --tags traefik
 
 ### Step 5: Install Monitoring Stack (Optional)
 
-Lightweight VictoriaMetrics monitoring stack optimised for Raspberry Pi:
-- **VictoriaMetrics Single**: Time-series database (~400MB total vs ~1.2GB for kube-prometheus-stack)
+Lightweight observability stack optimised for Raspberry Pi:
+- **VictoriaMetrics Single**: Metrics TSDB (~400MB total vs ~1.2GB for kube-prometheus-stack)
 - **VMAgent**: Lightweight metrics scraper
-- **Grafana**: Dashboard visualisation
+- **VictoriaLogs Single**: Log storage (LogsQL, Loki-compatible ingest)
+- **Fluent Bit**: DaemonSet that collects and forwards container logs to VictoriaLogs
+- **Grafana**: Unified dashboards for metrics and logs
 - **Node Exporter**: Host-level metrics
 
 ```bash
@@ -254,7 +263,9 @@ ansible-playbook 04-monitoring.yml
 Targeted reruns:
 ```bash
 ansible-playbook 04-monitoring.yml --tags vmsingle
+ansible-playbook 04-monitoring.yml --tags victorialogs
 ansible-playbook 04-monitoring.yml --tags vmagent
+ansible-playbook 04-monitoring.yml --tags fluent-bit
 ansible-playbook 04-monitoring.yml --tags grafana
 ansible-playbook 04-monitoring.yml --tags verification
 ```
@@ -302,15 +313,17 @@ kubectl logs longhorn-test-pod
 
 | Service | URL | Notes |
 |---------|-----|-------|
-| Grafana | http://192.168.1.200/grafana | Default: admin/admin |
+| Grafana | http://192.168.1.200/grafana | Default: admin/admin — metrics + logs dashboards |
 | VictoriaMetrics | `kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428` | http://localhost:8428 |
+| VictoriaLogs UI | http://192.168.1.200/victorialogs/select/vmui/ | Native VictoriaLogs web UI |
+| VictoriaLogs API | `kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428` | http://localhost:9428 (direct API access) |
 | Hubble UI | `kubectl port-forward -n kube-system svc/hubble-ui 12000:80` | http://localhost:12000 |
 | Traefik Dashboard | `kubectl port-forward -n traefik svc/traefik 9000:9000` | http://localhost:9000/dashboard/ |
 | Longhorn UI | `kubectl port-forward -n longhorn-system svc/longhorn-frontend 8080:80` | http://localhost:8080 |
 
 ### Monitoring Troubleshooting
 
-If Grafana is empty, separate the problem into three layers:
+**Grafana metric panels empty** — separate the problem into three layers:
 
 1. **Exporter layer**: confirm the application exposes metrics
    ```bash
@@ -327,6 +340,24 @@ If Grafana is empty, separate the problem into three layers:
    kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
    curl 'http://127.0.0.1:8428/api/v1/label/__name__/values' | grep cilium
    ```
+
+**Grafana log panels empty** — work bottom-up: Fluent Bit → VictoriaLogs → Grafana datasource:
+
+1. **Fluent Bit running?**
+   ```bash
+   kubectl get pods -n monitoring -l app.kubernetes.io/name=fluent-bit -o wide
+   kubectl logs -n monitoring -l app.kubernetes.io/name=fluent-bit --tail=50 | grep -i error
+   ```
+
+2. **VictoriaLogs receiving data with `_msg` field?**
+   ```bash
+   kubectl exec -n monitoring vlogs-victoria-logs-single-server-0 -- \
+     wget -qO- 'http://127.0.0.1:9428/select/logsql/query?query=*&limit=1' | grep _msg
+   ```
+   If `_msg` is absent, the Fluent Bit `Rename log _msg` filter is missing — rerun `--tags fluent-bit`.
+
+3. **Grafana datasource**:  the VictoriaLogs datasource must be provisioned with `uid: victorialogs`
+   so that dashboard panel datasource references resolve correctly.
 
 ### Adding New Dashboards
 

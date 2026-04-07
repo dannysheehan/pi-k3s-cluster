@@ -725,6 +725,51 @@
       tags: [monitoring, grafana]
 
     # ========================================================================
+    # TRAEFIK INGRESSROUTE FOR VICTORIALOGS WEB UI
+    # ========================================================================
+    # VictoriaLogs serves its web UI at /select/vmui/ on the backend service.
+    # We expose it under /victorialogs using a StripPrefix middleware so that
+    # requests reaching the pod have the correct paths.
+    - name: Create VictoriaLogs StripPrefix middleware
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: Middleware
+          metadata:
+            name: vlogs-strip-prefix
+            namespace: monitoring
+          spec:
+            stripPrefix:
+              prefixes:
+                - /victorialogs
+      tags: [monitoring, victorialogs]
+
+    - name: Create VictoriaLogs IngressRoute
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: victorialogs
+            namespace: monitoring
+          spec:
+            entryPoints:
+              - web
+            routes:
+              - match: PathPrefix(`/victorialogs`)
+                kind: Rule
+                middlewares:
+                  - name: vlogs-strip-prefix
+                services:
+                  - name: vlogs-victoria-logs-single-server
+                    port: 9428
+      tags: [monitoring, victorialogs]
+
+    # ========================================================================
     # TRAEFIK INGRESSROUTE FOR GRAFANA ACCESS
     # ========================================================================
     # Note: No StripPrefix middleware needed because Grafana is configured with
@@ -887,9 +932,12 @@
             kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
             Then access: http://localhost:8428
           
-          VictoriaLogs (port-forward):
+          VictoriaLogs Web UI:
+            URL: http://192.168.1.200/victorialogs/select/vmui/
+
+          VictoriaLogs (port-forward / direct API):
             kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428
-            Then access: http://localhost:9428/select/logsql/query?query=*&limit=10
+            Then access: http://localhost:9428/select/vmui/
           
           Pre-installed Dashboards:
             - Node Exporter Full (ID: 1860)

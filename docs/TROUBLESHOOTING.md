@@ -139,6 +139,49 @@ kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8
 curl 'http://127.0.0.1:8428/api/v1/label/__name__/values' | grep -E 'cilium|traefik|hubble'
 ```
 
+### VictoriaLogs
+- Log storage and query backend (LogsQL compatible, Loki-compatible ingest).
+- Stores logs under the same `monitoring` namespace as VictoriaMetrics.
+- Exposes HTTP API at port 9428.
+- **Requires `_msg` as the message field.** Fluent Bit writes logs using a field named `log`;
+  the Fluent Bit config includes a `[FILTER] Name modify / Rename log _msg` block to
+  translate this before forwarding. If this filter is missing, VictoriaLogs accepts the
+  entries but silently marks them as having `"missing _msg field"` — every query returns
+  no visible text.
+
+What depends on it:
+- Grafana Logs dashboards and Explore
+- Fluent Bit (sends to it)
+
+Useful checks:
+```bash
+kubectl get pods -n monitoring -l app=vlogs-victoria-logs-single
+kubectl get statefulset -n monitoring vlogs-victoria-logs-single-server
+# Smoke test — should return log lines with a _msg field
+kubectl exec -n monitoring vlogs-victoria-logs-single-server-0 -- \
+  wget -qO- 'http://127.0.0.1:9428/select/logsql/query?query=*&limit=1'
+# Check for _msg field presence
+kubectl exec -n monitoring vlogs-victoria-logs-single-server-0 -- \
+  wget -qO- 'http://127.0.0.1:9428/select/logsql/query?query=*&limit=1' | grep _msg
+```
+
+### Fluent Bit
+- Log collection DaemonSet running on every worker node.
+- Tails `/var/log/containers/*.log` and enriches entries with Kubernetes metadata.
+- Forwards logs to VictoriaLogs via the Loki-compatible `/insert/loki/api/v1/push` endpoint.
+- **Critical filter**: must rename `log` → `_msg` before forwarding (see VictoriaLogs note above).
+
+What depends on it:
+- VictoriaLogs receiving any data at all
+
+Useful checks:
+```bash
+kubectl get pods -n monitoring -l app.kubernetes.io/name=fluent-bit
+kubectl logs -n monitoring -l app.kubernetes.io/name=fluent-bit --tail=50
+# Check Fluent Bit output plugin errors specifically
+kubectl logs -n monitoring -l app.kubernetes.io/name=fluent-bit --tail=100 | grep -i 'error\|warn\|output'
+```
+
 ## How The Networking Pieces Fit Together
 
 ### Primary cluster network
@@ -223,7 +266,35 @@ kubectl exec -n kube-system ds/cilium -- sh -c 'wget -qO- http://127.0.0.1:9962/
 kubectl exec -n traefik deploy/traefik -- sh -c 'wget -qO- http://127.0.0.1:9100/metrics | head'
 curl 'http://127.0.0.1:8428/api/v1/series?match[]=cilium_process_cpu_seconds_total'
 ```
+### Logs missing in Grafana (VictoriaLogs datasource shows no data)
+Work bottom-up: Fluent Bit → VictoriaLogs ingest → Grafana datasource.
 
+Checks:
+```bash
+# 1. Is Fluent Bit running on all nodes?
+kubectl get pods -n monitoring -l app.kubernetes.io/name=fluent-bit -o wide
+
+# 2. Any Fluent Bit output errors?
+kubectl logs -n monitoring -l app.kubernetes.io/name=fluent-bit --tail=100 | grep -i 'error\|warn'
+
+# 3. Is VictoriaLogs receiving and storing anything?
+kubectl exec -n monitoring vlogs-victoria-logs-single-server-0 -- \
+  wget -qO- 'http://127.0.0.1:9428/select/logsql/query?query=*&limit=1'
+
+# 4. Do stored entries have a _msg field? (absence = Fluent Bit filter missing)
+kubectl exec -n monitoring vlogs-victoria-logs-single-server-0 -- \
+  wget -qO- 'http://127.0.0.1:9428/select/logsql/query?query=*&limit=1' | grep _msg
+
+# 5. Is the Grafana datasource uid correct? (must be 'victorialogs')
+kubectl get secret -n monitoring grafana -o jsonpath='{.data.grafana\.ini}' | base64 -d | grep -A5 victorialogs
+```
+
+Most common root causes:
+- Fluent Bit `[FILTER] Rename log _msg` block is missing → all entries stored without message text
+- Grafana datasource provisioned without explicit `uid: victorialogs` → dashboard panels using
+  hardcoded `"uid": "victorialogs"` cannot resolve the datasource
+- LogsQL query syntax error in a dashboard panel (LogsQL is **not** PromQL —
+  `count() by (field)` does not work; use a plain filter expression with `queryType: hits`)
 ## Useful Namespace Views
 
 ```bash
@@ -240,7 +311,27 @@ ansible-playbook 03-addons.yml --tags cilium
 ansible-playbook 03-addons.yml --tags multus,whereabouts
 ansible-playbook 03-addons.yml --tags longhorn
 ansible-playbook 03-addons.yml --tags traefik
+ansible-playbook 04-monitoring.yml --tags vmsingle
+ansible-playbook 04-monitoring.yml --tags victorialogs
 ansible-playbook 04-monitoring.yml --tags vmagent
+ansible-playbook 04-monitoring.yml --tags fluent-bit
 ansible-playbook 04-monitoring.yml --tags grafana
 ansible-playbook 04-monitoring.yml --tags verification
 ```
+
+## Ansible Helm Gotcha: `helm repo update` Must Be Explicit
+
+The `kubernetes.core.helm_repository` module only registers a repo URL — it
+does **not** run `helm repo update`. If a targeted rerun skips the repo
+registration tasks but tries to install a chart, Helm will use a stale index
+and fail with:
+
+```
+Error: no chart version found for <chart>-<version>
+```
+
+The playbook works around this by running an explicit
+`ansible.builtin.command: helm repo update` task tagged with **all** component
+tags so it always fires before any install task in a targeted rerun. If you
+add a new chart to the playbook, ensure its component tag is also on the repo
+tasks and the `helm repo update` task.

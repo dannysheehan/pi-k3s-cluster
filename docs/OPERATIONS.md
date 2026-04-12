@@ -73,6 +73,15 @@ What it establishes:
 - Longhorn for distributed storage on the SSDs
 - Traefik for ingress and Gateway API support
 
+Longhorn-specific note:
+- `03-addons.yml` explicitly sets `csi.kubeletRootDir: "/var/lib/kubelet"`.
+  This is intentional. Longhorn's kubelet root-dir auto-detection can fail on
+  K3s during CSI deployment, which causes `longhorn-driver-deployer` to crash
+  with `failed to get arg root-dir` and enter `CrashLoopBackOff`.
+- see
+  - https://longhorn.io/docs/latest/advanced-resources/os-distro-specific/csi-on-k3s/
+  - https://longhorn.io/kb/troubleshooting-none-standard-kubelet-dir/
+
 Why order matters:
 - Cilium must be healthy before most other workloads can schedule normally.
 - Multus and Whereabouts depend on the host bridge from `01-infra-prep.yml`.
@@ -134,6 +143,8 @@ Suspicious:
 - Traefik never receives a `LoadBalancer` IP
 - Longhorn managers stay unhealthy or volumes cannot attach after the storage
   network has supposedly been configured
+- `longhorn-driver-deployer` keeps restarting even though other Longhorn CSI
+  pods look healthy
 
 ### During `04-monitoring.yml`
 

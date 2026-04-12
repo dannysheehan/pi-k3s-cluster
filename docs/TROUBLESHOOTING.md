@@ -109,6 +109,9 @@ Longhorn-specific tuning in this repo:
 - Repo-managed PVCs use a dedicated `longhorn-rpi` StorageClass with
   `numberOfReplicas: "2"`. This is necessary because Kubernetes does not allow
   in-place updates to `StorageClass.parameters`.
+- `03-addons.yml` pins `csi.kubeletRootDir: "/var/lib/kubelet"` because
+  Longhorn's kubelet root-dir auto-detection can fail on K3s and break CSI
+  deployment with a fatal `failed to get arg root-dir` error.
 - `replica-auto-balance` is patched to `least-effort` so Longhorn can correct
   replica drift gradually instead of leaving long-lived skew in place.
 - `concurrent-replica-rebuild-per-node-limit` is patched to `1` to prevent
@@ -320,6 +323,39 @@ If events mention `driver.longhorn.io/csi.sock: connect: no such file or directo
 the immediate problem is that kubelet could not reach the Longhorn CSI plugin on
 that node. Treat that as a node / Longhorn control-plane disruption, not an app
 misconfiguration.
+
+If `longhorn-driver-deployer` itself is in `CrashLoopBackOff`, collect the real
+error from the node rather than relying on the Kubernetes event text:
+
+```bash
+ssh dsheehan@<node-ip>
+sudo tee /etc/crictl.yaml >/dev/null <<'EOF'
+runtime-endpoint: unix:///run/k3s/containerd/containerd.sock
+image-endpoint: unix:///run/k3s/containerd/containerd.sock
+timeout: 10
+debug: false
+EOF
+sudo crictl ps -a | grep longhorn-driver-deployer
+sudo crictl logs <container-id>
+```
+
+If the log contains `failed to get arg root-dir` or asks for
+`--kubelet-root-dir`, Longhorn failed to auto-detect the K3s kubelet
+directory. In this repo, the durable fix is:
+
+```yaml
+csi:
+  kubeletRootDir: "/var/lib/kubelet"
+```
+
+Recovery:
+```bash
+ansible-playbook 03-addons.yml --tags longhorn
+```
+
+References:
+- https://longhorn.io/docs/latest/advanced-resources/os-distro-specific/csi-on-k3s/
+- https://longhorn.io/kb/troubleshooting-none-standard-kubelet-dir/
 
 ### Probe failures across many unrelated pods
 Usually a node-health problem rather than many simultaneous app regressions.

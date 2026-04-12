@@ -127,6 +127,43 @@ If the issue started after secondary-network changes, rerun:
 ansible-playbook 03-addons.yml --tags multus,whereabouts,longhorn
 ```
 
+If `longhorn-driver-deployer` is the pod that is crashing, verify the real
+error from the node before changing storage-network settings:
+
+```bash
+ssh dsheehan@<node-ip>
+sudo tee /etc/crictl.yaml >/dev/null <<'EOF'
+runtime-endpoint: unix:///run/k3s/containerd/containerd.sock
+image-endpoint: unix:///run/k3s/containerd/containerd.sock
+timeout: 10
+debug: false
+EOF
+sudo crictl ps -a | grep longhorn-driver-deployer
+sudo crictl logs <container-id>
+```
+
+If the log says `failed to get arg root-dir` or asks for
+`--kubelet-root-dir`, Longhorn's kubelet root-dir auto-detection failed on
+K3s. This repo fixes that by setting:
+
+```yaml
+csi:
+  kubeletRootDir: "/var/lib/kubelet"
+```
+
+Then rerun:
+
+```bash
+ansible-playbook 03-addons.yml --tags longhorn
+```
+
+Validation:
+```bash
+kubectl -n longhorn-system get pods -o wide
+kubectl -n longhorn-system rollout status deploy/longhorn-driver-deployer
+kubectl -n longhorn-system get ds longhorn-csi-plugin
+```
+
 Note:
 - `csi-attacher`, `csi-provisioner`, `csi-resizer`, and `csi-snapshotter`
   should migrate to workers in this repo

@@ -488,6 +488,9 @@
         values:
           global:
             nodeSelector: "{{ workload_node_selector }}"
+          csi:
+            # Longhorn auto-detection can fail on K3s; pin the kubelet root dir.
+            kubeletRootDir: "/var/lib/kubelet"
           defaultSettings:
             defaultDataPath: "/mnt/ssd/longhorn"
             defaultReplicaCount: "{{ longhorn_default_replica_count }}"

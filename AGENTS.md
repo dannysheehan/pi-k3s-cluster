@@ -62,6 +62,9 @@ The playbook patches the Multus DaemonSet to add:
 
 Without these, pod creation fails with `unknown FS magic` or `operation not permitted`.
 
+### Longhorn K3s kubelet root dir is pinned intentionally
+The playbook sets `csi.kubeletRootDir: /var/lib/kubelet` in Longhorn Helm values. This is intentional. Longhorn's kubelet root-dir auto-detection can fail on K3s, causing `longhorn-driver-deployer` to crash with `failed to get arg root-dir` and `Need to specify "--kubelet-root-dir"`. Do not remove this override unless the K3s kubelet path is changed and verified.
+
 ### Longhorn node tags are manual
 Longhorn does not auto-populate `spec.tags`. The playbook sets `storage-network` tags via `longhorn_node_tags` in `group_vars/all.yml`. When adding a worker, rerun `--tags longhorn` to apply tags.
 

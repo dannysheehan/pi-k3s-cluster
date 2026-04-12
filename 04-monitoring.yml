@@ -192,6 +192,32 @@
               memory: 64Mi
       tags: [monitoring, node_exporter]
 
+    # Several charts assume nodes answer health checks in ~1s. That is often
+    # too optimistic on Pi workers under storage or network pressure, so widen
+    # the probe budget before concluding the pod is broken.
+    - name: Relax Node Exporter probes for slow nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: DaemonSet
+        namespace: monitoring
+        name: node-exporter-prometheus-node-exporter
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: node-exporter
+                    readinessProbe:
+                      periodSeconds: 15
+                      timeoutSeconds: 5
+                      failureThreshold: 5
+                    livenessProbe:
+                      periodSeconds: 15
+                      timeoutSeconds: 5
+                      failureThreshold: 5
+      tags: [monitoring, node_exporter]
+
     # ========================================================================
     # VICTORIA METRICS SINGLE - Time-series database
     # ========================================================================
@@ -206,6 +232,24 @@
         timeout: 300s
         values:
           server:
+            # Mark storage-backed observability workloads so the scheduler can
+            # prefer not to co-locate all of them on one worker. Replica spread
+            # in Longhorn does not prevent attached-volume ownership from piling
+            # onto the same node.
+            podLabels:
+              pi-cluster.io/storage-heavy: "true"
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: pi-cluster.io/storage-heavy
+                            operator: In
+                            values:
+                              - "true"
+                      topologyKey: kubernetes.io/hostname
             retentionPeriod: "{{ vm_retention }}"
             persistentVolume:
               enabled: true
@@ -225,6 +269,34 @@
               search.maxQueueDuration: 30s
       tags: [monitoring, vmsingle]
 
+    # vmsingle is storage-backed and can take longer to become meaningfully
+    # ready than stateless web apps. Favor a slower readiness transition over
+    # repeated liveness restarts.
+    - name: Relax Victoria Metrics probes for storage-backed startup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: StatefulSet
+        namespace: monitoring
+        name: vmsingle-victoria-metrics-single-server
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: vmsingle
+                    readinessProbe:
+                      initialDelaySeconds: 10
+                      periodSeconds: 15
+                      timeoutSeconds: 10
+                      failureThreshold: 5
+                    livenessProbe:
+                      initialDelaySeconds: 60
+                      periodSeconds: 30
+                      timeoutSeconds: 10
+                      failureThreshold: 10
+      tags: [monitoring, vmsingle]
+
     # ========================================================================
     # VICTORIALOGS SINGLE - Log storage backend
     # ========================================================================
@@ -239,6 +311,23 @@
         timeout: 300s
         values:
           server:
+            # Use the same label/anti-affinity scheme as Grafana and vmsingle
+            # so large PVC-backed monitoring components do not all land on the
+            # same worker after a rollout or node recovery.
+            podLabels:
+              pi-cluster.io/storage-heavy: "true"
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchExpressions:
+                          - key: pi-cluster.io/storage-heavy
+                            operator: In
+                            values:
+                              - "true"
+                      topologyKey: kubernetes.io/hostname
             retentionPeriod: "{{ victorialogs_retention }}"
             persistentVolume:
               enabled: true
@@ -251,6 +340,34 @@
               limits:
                 cpu: 500m
                 memory: 512Mi
+      tags: [monitoring, victorialogs]
+
+    # VictoriaLogs has the same failure mode as vmsingle on this hardware:
+    # mount or replay work can make the pod slow to answer health checks
+    # without the process actually being wedged.
+    - name: Relax VictoriaLogs probes for storage-backed startup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: StatefulSet
+        namespace: monitoring
+        name: vlogs-victoria-logs-single-server
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: vlogs
+                    readinessProbe:
+                      initialDelaySeconds: 10
+                      periodSeconds: 15
+                      timeoutSeconds: 10
+                      failureThreshold: 5
+                    livenessProbe:
+                      initialDelaySeconds: 60
+                      periodSeconds: 30
+                      timeoutSeconds: 10
+                      failureThreshold: 10
       tags: [monitoring, victorialogs]
 
     # Note: VictoriaLogs Single uses a StatefulSet, not a Deployment
@@ -473,6 +590,33 @@
                     action: keep
       tags: [monitoring, vmagent]
 
+    # vmagent is lightweight, but on an already busy worker it can still miss
+    # short probe deadlines while discovery and remote write queues settle.
+    - name: Relax VMAgent probes for loaded nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Deployment
+        namespace: monitoring
+        name: vmagent-victoria-metrics-agent
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: vmagent
+                    readinessProbe:
+                      initialDelaySeconds: 10
+                      periodSeconds: 15
+                      timeoutSeconds: 5
+                      failureThreshold: 5
+                    livenessProbe:
+                      initialDelaySeconds: 15
+                      periodSeconds: 20
+                      timeoutSeconds: 10
+                      failureThreshold: 5
+      tags: [monitoring, vmagent]
+
     - name: Wait for VMAgent deployment to be ready
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
@@ -596,6 +740,32 @@
                   Line_Format       json
       tags: [monitoring, fluent-bit]
 
+    # Fluent Bit readiness often fails first during node stalls because it is a
+    # DaemonSet on every worker and its health endpoint is sensitive to brief
+    # CPU starvation. Give it more time before kubelet restarts it.
+    - name: Relax Fluent Bit probes for slow nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: DaemonSet
+        namespace: monitoring
+        name: fluent-bit
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: fluent-bit
+                    readinessProbe:
+                      periodSeconds: 15
+                      timeoutSeconds: 5
+                      failureThreshold: 5
+                    livenessProbe:
+                      periodSeconds: 15
+                      timeoutSeconds: 5
+                      failureThreshold: 5
+      tags: [monitoring, fluent-bit]
+
     # ========================================================================
     # GRAFANA - Dashboards
     # ========================================================================
@@ -612,6 +782,23 @@
           # Single replica for RPi — avoids unnecessary resource use and
           # Multi-Attach PVC errors with ReadWriteOnce volumes.
           replicas: 1
+          # Grafana is storage-backed and uses a single ReadWriteOnce PVC.
+          # Prefer not to place it beside the other heavy PVC-backed monitoring
+          # pods unless the scheduler has no better option.
+          podLabels:
+            pi-cluster.io/storage-heavy: "true"
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - key: pi-cluster.io/storage-heavy
+                          operator: In
+                          values:
+                            - "true"
+                    topologyKey: kubernetes.io/hostname
           # Grafana uses a single Longhorn ReadWriteOnce PVC. Recreate avoids
           # rollout overlap where a new pod starts before the old pod releases
           # the volume, which otherwise triggers Multi-Attach errors.
@@ -629,6 +816,23 @@
             limits:
               cpu: 200m
               memory: 256Mi
+          # Grafana can take a few seconds to answer /api/health on this
+          # cluster, especially after plugin load or while SQLite is busy.
+          # The chart default readiness timeout (1s) is too aggressive and
+          # causes the Service endpoint to flap, which Traefik surfaces as 502.
+          readinessProbe:
+            timeoutSeconds: 5
+          # Startup probe prevents the liveness/readiness cycle from declaring
+          # Grafana dead while plugins load or SQLite is still warming up on
+          # slower storage.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           # Third-party plugins to install on Grafana startup.
           # Requires outbound internet access from the monitoring namespace on
           # first install — the pod downloads plugins from grafana.com.
@@ -793,6 +997,13 @@
                 services:
                   - name: grafana
                     port: 80
+                    # Grafana's Service exposes port 80 -> targetPort 3000.
+                    # Traefik occasionally fails to build pod backends for this
+                    # translated Service and returns `404 Not Found` with
+                    # `no servers found for monitoring/grafana` in its logs.
+                    # NativeLB makes Traefik forward to the Service ClusterIP
+                    # instead of resolving pod endpoints itself.
+                    nativeLB: true
       tags: [monitoring, grafana]
 
     - name: Create custom Cilium dashboard ConfigMap

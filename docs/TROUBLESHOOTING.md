@@ -88,6 +88,8 @@ kubectl get ippools.whereabouts.cni.cncf.io -A
 - Stores data on `/mnt/ssd/longhorn`.
 - Uses the dedicated storage network for replication traffic.
 - Also uses `longhorn.io/storage-ip` annotations to bind replication to each node's storage IP.
+- On Pi hardware, it is often the first subsystem to show node pressure because
+  attach, rebuild, and health-check work all compete for limited CPU and I/O.
 
 What depends on it:
 - Persistent volumes for VictoriaMetrics and Grafana
@@ -100,7 +102,19 @@ kubectl get settings.longhorn.io -n longhorn-system
 kubectl get nodes.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}: {.metadata.annotations.longhorn\.io/storage-ip}{"\n"}{end}'
 kubectl get network-attachment-definition -n longhorn-system
 kubectl describe ds longhorn-manager -n longhorn-system
+./scripts/analyze-longhorn-replicas.sh
 ```
+
+Longhorn-specific tuning in this repo:
+- Repo-managed PVCs use a dedicated `longhorn-rpi` StorageClass with
+  `numberOfReplicas: "2"`. This is necessary because Kubernetes does not allow
+  in-place updates to `StorageClass.parameters`.
+- `replica-auto-balance` is patched to `least-effort` so Longhorn can correct
+  replica drift gradually instead of leaving long-lived skew in place.
+- `concurrent-replica-rebuild-per-node-limit` is patched to `1` to prevent
+  rebuild bursts from dominating a small worker.
+- `longhorn-manager` readiness and `longhorn-csi-plugin` liveness probes are
+  widened because the defaults were too aggressive during node stalls.
 
 ### Traefik
 - Ingress and Gateway API controller.
@@ -122,6 +136,11 @@ kubectl get gateway -A
 kubectl get httproute -A
 ```
 
+Grafana-specific note:
+- The Grafana `IngressRoute` uses `nativeLB: true`. This avoids a failure mode
+  where Traefik intermittently logged `no servers found for monitoring/grafana`
+  against the Service that exposes port `80 -> 3000`.
+
 ### VictoriaMetrics Stack
 - `vmsingle`: stores metrics
 - `vmagent`: scrapes targets and remote-writes to `vmsingle`
@@ -137,6 +156,7 @@ kubectl get pods -n monitoring
 kubectl logs -n monitoring -l app.kubernetes.io/instance=vmagent --tail=200
 kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
 curl 'http://127.0.0.1:8428/api/v1/label/__name__/values' | grep -E 'cilium|traefik|hubble'
+./scripts/analyze-probe-pressure.sh
 ```
 
 ### VictoriaLogs
@@ -183,6 +203,42 @@ kubectl logs -n monitoring -l app.kubernetes.io/name=fluent-bit --tail=50
 # Check Fluent Bit output plugin errors specifically
 kubectl logs -n monitoring -l app.kubernetes.io/name=fluent-bit --tail=100 | grep -i 'error\|warn\|output'
 ```
+
+## Pi Cluster Failure Pattern
+
+On small ARM clusters, the symptoms often arrive in the wrong order:
+- first you notice an app route returning `404` or `502`
+- then you find a failing readiness probe
+- then you see a `FailedMount` or `FailedAttachVolume`
+- only after that do you notice the worker briefly went `NodeNotReady`
+
+That sequence matters. It means the root cause is frequently node pressure or
+storage-control-plane instability, not the application that happens to be
+failing at the edge.
+
+Typical triggers on this cluster:
+- Longhorn rebuilds or attach work landing on an already busy worker
+- default 1-4 second liveness and readiness probes timing out during I/O stalls
+- too many storage-backed workloads attached to the same node
+- monitoring add-ons amplifying load while the node is already degraded
+
+The fastest way to confirm that pattern is:
+```bash
+./scripts/analyze-probe-pressure.sh
+./scripts/analyze-node-pressure.sh k3s-wrk-03-f118e128
+./scripts/analyze-longhorn-replicas.sh
+kubectl get events -A --sort-by=.lastTimestamp | tail -120
+```
+
+Interpret the outputs in this order:
+1. Did a node go `NodeNotReady` or `NodeStatusUnknown`?
+2. Did Longhorn / CSI warnings happen at the same time?
+3. Did unrelated app probes fail immediately after that?
+4. Are attached volumes or scheduled replica bytes concentrated on one worker?
+
+If the answer is yes across those checks, tune the node and storage pressure
+first. App-level probe fixes help, but they will not fully stabilize a worker
+that is saturated.
 
 ## How The Networking Pieces Fit Together
 
@@ -256,7 +312,34 @@ kubectl get pods -n longhorn-system
 kubectl get volumes.longhorn.io -n longhorn-system
 kubectl describe volume <name> -n longhorn-system
 kubectl get settings.longhorn.io storage-network -n longhorn-system -o jsonpath='{.value}'
+./scripts/analyze-longhorn-replicas.sh
+./scripts/analyze-node-pressure.sh <node>
 ```
+
+If events mention `driver.longhorn.io/csi.sock: connect: no such file or directory`,
+the immediate problem is that kubelet could not reach the Longhorn CSI plugin on
+that node. Treat that as a node / Longhorn control-plane disruption, not an app
+misconfiguration.
+
+### Probe failures across many unrelated pods
+Usually a node-health problem rather than many simultaneous app regressions.
+
+Checks:
+```bash
+./scripts/analyze-probe-pressure.sh
+kubectl top nodes
+kubectl top pods -A --sort-by=cpu
+kubectl get events -A --sort-by=.lastTimestamp | tail -120
+```
+
+If the same node shows up in:
+- `NodeNotReady`
+- Longhorn / CSI warnings
+- Cilium probe failures
+- monitoring probe failures
+
+then debug that node first. On Pi clusters it is common for one overloaded
+worker to create a cluster-wide-looking incident.
 
 ### Metrics missing in Grafana
 Split the problem into exporter, scrape, and storage/query.

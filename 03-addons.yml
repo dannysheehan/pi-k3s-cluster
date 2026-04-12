@@ -490,6 +490,7 @@
             nodeSelector: "{{ workload_node_selector }}"
           defaultSettings:
             defaultDataPath: "/mnt/ssd/longhorn"
+            defaultReplicaCount: "{{ longhorn_default_replica_count }}"
             # Use Multus storage network for replication traffic
             storageNetwork: "longhorn-system/storage-network"
             # Format required by Longhorn: key:value;key2:value2
@@ -632,6 +633,87 @@
         - item.metadata.name in control_plane_k8s_node_names
       tags: [longhorn, storage]
 
+    # On small SBC clusters, keeping the default replica count at 3 often means
+    # more rebuild traffic, more replica scheduling pressure, and more write
+    # amplification than the hardware can tolerate comfortably. Setting the
+    # cluster default to 2 is a deliberate durability/performance tradeoff for
+    # this environment. Existing volumes keep their current replica count; this
+    # mainly affects newly provisioned volumes.
+    - name: Set Longhorn default replica count for new volumes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Setting
+        api_version: longhorn.io/v1beta2
+        name: default-replica-count
+        namespace: longhorn-system
+        definition:
+          value: "{{ longhorn_default_replica_count | string }}"
+      tags: [longhorn, storage]
+
+    # StorageClass parameters are immutable, so the chart-managed `longhorn`
+    # class cannot be patched from 3 replicas down to 2 in place. Create a
+    # dedicated StorageClass for repo-managed workloads instead.
+    - name: Create Longhorn Pi StorageClass for new PVCs
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        kind: StorageClass
+        api_version: storage.k8s.io/v1
+        name: "{{ storage_class }}"
+        definition:
+          metadata:
+            name: "{{ storage_class }}"
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "false"
+          provisioner: driver.longhorn.io
+          allowVolumeExpansion: true
+          reclaimPolicy: Delete
+          volumeBindingMode: Immediate
+          parameters:
+            dataEngine: "v1"
+            dataLocality: "disabled"
+            disableRevisionCounter: "true"
+            fromBackup: ""
+            fsType: "ext4"
+            numberOfReplicas: "{{ longhorn_default_replica_count | string }}"
+            staleReplicaTimeout: "30"
+            unmapMarkSnapChainRemoved: "ignored"
+      tags: [longhorn, storage]
+
+    # Pi-class workers have limited CPU and I/O headroom. If Longhorn leaves
+    # replica placement skewed for long periods, future rebuilds and snapshot
+    # syncs keep hitting the same node. `least-effort` is a conservative middle
+    # ground: it allows gradual correction without the more aggressive
+    # rebalancing behavior of `best-effort`.
+    - name: Enable Longhorn replica auto-balance for future drift correction
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Setting
+        api_version: longhorn.io/v1beta2
+        name: replica-auto-balance
+        namespace: longhorn-system
+        definition:
+          value: least-effort
+      tags: [longhorn, storage]
+
+    # The upstream default allows multiple replica rebuilds on a node at once.
+    # That is reasonable on faster x86 servers but can overwhelm Pi workers and
+    # cause CSI timeouts, probe failures, and `NodeNotReady` cascades. Keep it
+    # to one rebuild per node so the cluster degrades more gracefully.
+    - name: Reduce Longhorn concurrent replica rebuild pressure per node
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Setting
+        api_version: longhorn.io/v1beta2
+        name: concurrent-replica-rebuild-per-node-limit
+        namespace: longhorn-system
+        definition:
+          value: "1"
+      tags: [longhorn, storage]
+
     - name: Spread Longhorn CSI controller deployments across worker nodes
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -664,6 +746,52 @@
       vars:
         workload_node_selector: >-
           {{ { workload_node_label_key: workload_node_label_value } }}
+      tags: [longhorn, storage]
+
+    # Longhorn's CSI plugin can briefly look unhealthy during node stalls even
+    # when it is about to recover. Wider probe budgets reduce false restarts and
+    # the follow-on `csi.sock` mount failures seen on loaded Pi nodes.
+    - name: Relax Longhorn CSI plugin liveness probe for slow nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: DaemonSet
+        namespace: longhorn-system
+        name: longhorn-csi-plugin
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: longhorn-csi-plugin
+                    livenessProbe:
+                      initialDelaySeconds: 10
+                      periodSeconds: 10
+                      timeoutSeconds: 10
+                      failureThreshold: 5
+      tags: [longhorn, storage]
+
+    # The manager is part of the storage control plane. On this cluster the
+    # default readiness timeout was short enough that transient I/O or CPU
+    # stalls made the node look unhealthy even though it recovered seconds
+    # later. Readiness should tolerate that better than liveness.
+    - name: Relax Longhorn manager readiness probe for slow nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: DaemonSet
+        namespace: longhorn-system
+        name: longhorn-manager
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: longhorn-manager
+                    readinessProbe:
+                      periodSeconds: 15
+                      timeoutSeconds: 5
+                      failureThreshold: 5
       tags: [longhorn, storage]
 
     - name: Verify Longhorn is running

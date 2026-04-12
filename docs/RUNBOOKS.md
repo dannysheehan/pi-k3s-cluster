@@ -390,3 +390,104 @@ Once the PVC is gone, redeploy VictoriaLogs to get a fresh volume:
 ```bash
 ansible-playbook 04-monitoring.yml --tags victorialogs
 ```
+
+## 13. Move Existing Monitoring PVCs To `longhorn-rpi` Or Reduce Replica Count
+
+Symptom: The repo now provisions new Longhorn-backed PVCs with the
+`longhorn-rpi` StorageClass and `2` replicas, but older PVCs still show
+`numberOfReplicas: 3`.
+
+### Important distinction
+
+There are two different operations:
+
+1. Reduce replica count in place on an existing Longhorn volume.
+2. Recreate a PVC-backed workload so it uses the new `longhorn-rpi`
+   StorageClass for future provisioning.
+
+Use the first when you want less rebuild pressure without changing the PVC.
+Use the second when you want the workload to be fully aligned with the new repo
+defaults.
+
+### Verify current state
+
+```bash
+kubectl get pvc -n monitoring
+kubectl get sc longhorn-rpi
+kubectl get volume.longhorn.io -n longhorn-system \
+  pvc-f17f7630-a7e9-4c6f-b6af-9c3deee94d03 \
+  pvc-cdef4c9f-a12a-48ff-bd49-913979ad8927 \
+  -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.numberOfReplicas,NODE:.status.currentNodeID,STATE:.status.state
+```
+
+### Option A: Reduce replica count in place
+
+This keeps the same PVC and volume, but tells Longhorn to run with 2 replicas
+instead of 3.
+
+Example for Grafana:
+
+```bash
+kubectl patch volume.longhorn.io -n longhorn-system \
+  pvc-f17f7630-a7e9-4c6f-b6af-9c3deee94d03 \
+  --type=merge \
+  -p '{"spec":{"numberOfReplicas":2}}'
+```
+
+Example for VictoriaMetrics:
+
+```bash
+kubectl patch volume.longhorn.io -n longhorn-system \
+  pvc-cdef4c9f-a12a-48ff-bd49-913979ad8927 \
+  --type=merge \
+  -p '{"spec":{"numberOfReplicas":2}}'
+```
+
+Then watch Longhorn settle:
+
+```bash
+kubectl get volume.longhorn.io -n longhorn-system <volume-name> -w
+./scripts/analyze-longhorn-replicas.sh
+```
+
+Notes:
+- This is the least disruptive option.
+- Replica removal can take time while Longhorn cleans up the extra replica.
+- Do not do many of these at once on a stressed Pi cluster.
+
+### Option B: Recreate the workload on `longhorn-rpi`
+
+This provisions a brand-new PVC using the repo-managed StorageClass. Use this
+when you want the workload to fully adopt the new StorageClass rather than just
+changing replica count on the existing Longhorn volume.
+
+For recreatable monitoring data, the simplest approach is:
+
+1. Scale or stop the workload.
+2. Delete the old PVC.
+3. Rerun the relevant playbook tag so the PVC is recreated with
+   `storageClassName: longhorn-rpi`.
+
+Examples:
+
+```bash
+ansible-playbook 04-monitoring.yml --tags grafana
+ansible-playbook 04-monitoring.yml --tags vmsingle
+ansible-playbook 04-monitoring.yml --tags victorialogs
+```
+
+Important:
+- This is destructive unless you have a backup, export, or you are comfortable
+  losing the current data in that PVC.
+- `vmsingle` and `vlogs` store monitoring history. Recreating them means losing
+  retained metrics or logs unless you preserve the data separately.
+- Grafana recreation loses local dashboard/database state unless it is already
+  fully provisioned from code or backed up elsewhere.
+
+### Recommended approach for this cluster
+
+- For existing monitoring volumes that already contain useful data, reduce
+  replicas in place first.
+- For new or disposable workloads, let them come up on `longhorn-rpi`.
+- Avoid bulk migration of multiple storage-backed apps during a period when
+  Longhorn is already rebuilding or a node is flapping.

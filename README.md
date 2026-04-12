@@ -321,6 +321,31 @@ kubectl logs longhorn-test-pod
 | Traefik Dashboard | `kubectl port-forward -n traefik svc/traefik 9000:9000` | http://localhost:9000/dashboard/ |
 | Longhorn UI | `kubectl port-forward -n longhorn-system svc/longhorn-frontend 8080:80` | http://localhost:8080 |
 
+### Pi Cluster Stability Notes
+
+This repo now includes a small amount of deliberate "slow cluster" tuning for
+Pi-class hardware. The main issue is not that Raspberry Pi 4 nodes are
+unusable, but that they have much less headroom for probe storms, PVC attach
+latency, and replica rebuild bursts than x86 servers.
+
+In practice the failure pattern on this cluster was:
+- a busy worker temporarily stopped responding
+- kubelet and CSI operations timed out
+- Longhorn volumes briefly went `unknown` or failed to attach
+- app readiness checks started failing across unrelated workloads
+- Traefik then surfaced those backend flaps as `404` or `502`
+
+The repo now accounts for that by:
+- relaxing readiness and liveness probes for Longhorn and the monitoring stack
+- adding a `startupProbe` for Grafana
+- enabling `nativeLB: true` for the Grafana Traefik `IngressRoute`
+- preferring to spread storage-backed monitoring pods across workers
+- preparing Longhorn settings that reduce rebuild pressure and gradually correct replica skew
+
+These are not arbitrary delays. They are there because Pi clusters regularly
+see short CPU, I/O, and storage-control-plane stalls that would be invisible on
+larger hardware but are enough to trip default 1-4 second probes.
+
 ### Monitoring Troubleshooting
 
 **Grafana metric panels empty** — separate the problem into three layers:
@@ -358,6 +383,29 @@ kubectl logs longhorn-test-pod
 
 3. **Grafana datasource**:  the VictoriaLogs datasource must be provisioned with `uid: victorialogs`
    so that dashboard panel datasource references resolve correctly.
+
+**Grafana `/grafana` path returns `404` or `502`**:
+
+1. **Route exists but Traefik says `404 Not Found`**:
+   check Traefik logs for `no servers found for monitoring/grafana`.
+   The playbook now sets `nativeLB: true` on the Grafana `IngressRoute`
+   because Traefik was intermittently failing to resolve pod backends for the
+   `grafana` Service's `80 -> 3000` port translation.
+
+2. **Route exists but returns `502 Bad Gateway`**:
+   check whether the Grafana endpoint is flapping.
+   ```bash
+   kubectl get endpoints,endpointslices -n monitoring | grep grafana
+   kubectl describe pod -n monitoring -l app.kubernetes.io/name=grafana
+   kubectl logs -n monitoring deploy/grafana --tail=100
+   ```
+   On this cluster the chart default readiness timing was too aggressive, so
+   the repo now gives Grafana a wider readiness budget plus a `startupProbe`.
+
+3. **If Grafana itself is healthy but mounts fail**:
+   stop treating it as an ingress problem and move down to Longhorn / node
+   health. A missing `driver.longhorn.io/csi.sock`, `FailedMount`, or
+   `FailedAttachVolume` event points to storage control-plane instability.
 
 ### Adding New Dashboards
 
@@ -456,7 +504,20 @@ For recovery procedures, see [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md).
 - Keep VictoriaMetrics retention short and dashboard count lean. Monitoring is one of the fastest ways to consume RAM on 8GB Pis.
 - Consider disabling Hubble UI when not actively troubleshooting. The relay/UI pair is useful but not free on small ARM nodes.
 - If Longhorn replica rebuild traffic saturates the cluster, set replica count per workload rather than using a high default.
+- This repo sets Longhorn's default replica count to `2` for new volumes and
+  creates a dedicated `longhorn-rpi` StorageClass for repo-managed PVCs. That
+  is a conscious tradeoff for Pi hardware: less write amplification and rebuild
+  pressure, but lower fault tolerance than `3`. Existing Longhorn volumes keep
+  their current replica count until recreated or changed explicitly.
 - Use dedicated namespaces with explicit resource requests/limits for every add-on. Noisy-neighbor effects show up quickly on Pi hardware.
+- Expect default Kubernetes and Helm chart probes to be too optimistic. Many charts assume x86 SSD-backed nodes and treat 1-second health checks as normal; on Pi clusters that often creates false failures.
+- Tune readiness before liveness. A slow response should usually remove a pod from service first, not restart it immediately.
+- Separate replica spread from attached-volume ownership. Longhorn can have correctly distributed replicas while a single worker still carries too many active volume attachments.
+- Keep Longhorn rebuild concurrency low. Rebuild storms are expensive on USB SSD + SBC clusters and can amplify node stalls.
+- Use the helper scripts after any change:
+  - `./scripts/analyze-probe-pressure.sh`
+  - `./scripts/analyze-node-pressure.sh <node>`
+  - `./scripts/analyze-longhorn-replicas.sh`
 
 ## Architecture Notes
 
@@ -477,6 +538,10 @@ For recovery procedures, see [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md).
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Architecture decisions and rationale |
 | [`dashboards/README.md`](dashboards/README.md) | Custom Grafana dashboard workflow |
 | [`scripts/README.md`](scripts/README.md) | Verification script usage |
+
+If you need to move existing monitoring PVCs to the new `longhorn-rpi`
+StorageClass or reduce old Longhorn volumes from 3 replicas to 2 in place, use
+the runbook in [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md).
 
 ## References
 

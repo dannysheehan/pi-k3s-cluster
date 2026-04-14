@@ -402,9 +402,12 @@
     # Storage path: /mnt/ssd/longhorn on each node (USB SSD)
     #
     # STORAGE NETWORK CONFIGURATION:
-    # Uses Multus with ipvlan to attach Longhorn pods to the storage network.
-    # ipvlan is used instead of macvlan because it shares the MAC address
-    # with the parent interface, which works better with bridges.
+    # Uses Multus with the bridge CNI plugin to attach Longhorn pods to the
+    # storage network.
+    # Bridge mode is used instead of ipvlan because Longhorn's iSCSI initiator
+    # runs in the host network namespace via nsenter. With ipvlan L2, the host
+    # cannot reach its own pod's ipvlan address, which causes "No route to
+    # host" during volume discovery and attach/detach operations.
     #
     # The storage-ip annotation overrides the IP that Longhorn uses for
     # replication traffic, ensuring it uses the node's br-storage IP.

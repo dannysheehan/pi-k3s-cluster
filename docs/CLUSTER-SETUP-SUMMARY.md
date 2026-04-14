@@ -124,7 +124,7 @@ Both accessed via: `curl -H "Host: myapp.local" http://192.168.1.200`
 - Replication traffic isolated from application traffic
 - 10Gbps USB Ethernet for high throughput
 - **Configuration**: Node annotations with `longhorn.io/storage-ip`
-- **Implementation**: Multus `ipvlan` attachment on `br-storage` plus Longhorn `storage-ip` annotations
+- **Implementation**: Multus `bridge` attachment on `br-storage` plus Longhorn `storage-ip` annotations
 - **Node Scope**: Longhorn data scheduling is intentionally limited to worker nodes; the control plane is reserved for cluster services
 - **Controller Scope**: Longhorn CSI controller deployments are intended to run on workers; the CSI node plugin may still run on the control plane as a DaemonSet
 

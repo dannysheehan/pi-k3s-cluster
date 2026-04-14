@@ -494,6 +494,7 @@
           defaultSettings:
             defaultDataPath: "/mnt/ssd/longhorn"
             defaultReplicaCount: "{{ longhorn_default_replica_count }}"
+            nodeDownPodDeletionPolicy: "{{ longhorn_node_down_pod_deletion_policy }}"
             # Use Multus storage network for replication traffic
             storageNetwork: "longhorn-system/storage-network"
             # Format required by Longhorn: key:value;key2:value2
@@ -652,6 +653,21 @@
         namespace: longhorn-system
         definition:
           value: "{{ longhorn_default_replica_count | string }}"
+      tags: [longhorn, storage]
+
+    # On node loss, RWO volumes can stay pinned behind a stale attachment on the
+    # dead node. Deleting StatefulSet and Deployment pods lets their controllers
+    # recreate them on healthy nodes so Longhorn can reattach the volume.
+    - name: Set Longhorn node-down pod deletion policy
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Setting
+        api_version: longhorn.io/v1beta2
+        name: node-down-pod-deletion-policy
+        namespace: longhorn-system
+        definition:
+          value: "{{ longhorn_node_down_pod_deletion_policy }}"
       tags: [longhorn, storage]
 
     # StorageClass parameters are immutable, so the chart-managed `longhorn`

@@ -267,6 +267,10 @@ Operational policy:
 - Longhorn storage scheduling is worker-only in this repo
 - the add-ons playbook patches any control-plane Longhorn node to
   `allowScheduling: false` so the policy stays explicit after redeploys
+- the add-ons playbook sets Longhorn
+  `node-down-pod-deletion-policy=delete-both-statefulset-and-deployment-pod`
+  so StatefulSets and Deployments are recreated on healthy nodes after a worker
+  disappears instead of sitting behind a dead-node attachment forever
 - the add-ons playbook also labels worker nodes and applies that label to
   Longhorn's user-managed and system-managed components so CSI controllers do
   not drift onto the control plane on fresh installs
@@ -317,6 +321,11 @@ Dependencies:
 Important relationships:
 - Empty Grafana metric panels do not mean exporters are broken. The issue can
   be at the exporter, scrape, storage, query, or dashboard layer.
+- `vmagent` uses a small persistent remote-write queue in this repo so
+  temporary VictoriaMetrics outages do not immediately discard scraped samples.
+  The queue PVC is `2Gi`, and vmagent's on-disk queue is capped at
+  `2147483648` bytes per remote-write URL so it degrades into dropped samples
+  rather than unbounded disk growth if the write path stays broken.
 - Empty Grafana log panels do not mean Fluent Bit is broken. Diagnose bottom-up:
   Fluent Bit → VictoriaLogs ingest → Grafana datasource uid → dashboard panel query.
 - VictoriaLogs **requires `_msg`** as the field name for the log message body.
@@ -573,6 +582,7 @@ Most likely layers, in order:
 | Nodes stay `NotReady` after `02-k3s-install.yml` | Expected until Cilium, then Cilium | `kubectl get pods -n kube-system -l k8s-app=cilium -o wide` | K3s install intentionally leaves the cluster waiting on Cilium |
 | Longhorn volume will not attach | Longhorn or storage-network path | `kubectl get pods -n longhorn-system` | Quickly shows whether the Longhorn control plane itself is healthy |
 | Longhorn replicas use the wrong network | Multus, Whereabouts, or node `storage-ip` | `kubectl get nodes.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}: {.metadata.annotations.longhorn\\.io/storage-ip}{"\\n"}{end}'` | Confirms the node-level storage identity Longhorn is using |
+| Pod moved after node loss but volume still will not attach | Stale Kubernetes CSI `VolumeAttachment` still points at the dead node | `kubectl get volumeattachments` | If the old attachment still shows `attached: true`, the replacement pod will hit a `Multi-Attach` error until that stale attachment is removed |
 | Grafana dashboard is empty | Exporter, scrape, storage, or dashboard query | `kubectl logs -n monitoring -l app.kubernetes.io/instance=vmagent --tail=200` | VMAgent usually reveals missing targets, relabel issues, or scrape failures fastest |
 | Cilium dashboard is empty but Cilium is running | Dashboard query shape rather than exporter health | `curl 'http://127.0.0.1:8428/api/v1/series?match[]=cilium_process_cpu_seconds_total'` | Confirms whether metrics are already in VictoriaMetrics |
 | New pods start failing cluster-wide after Multus changes | Multus host CNI state | `kubectl logs -n kube-system ds/kube-multus-ds --tail=100` | Cluster-wide sandbox failures often come from the Multus host config path |

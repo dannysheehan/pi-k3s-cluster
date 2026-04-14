@@ -402,6 +402,10 @@
         timeout: 300s
         values:
           mode: deployment
+          persistentVolume:
+            enabled: true
+            storageClassName: "{{ storage_class }}"
+            size: "{{ vmagent_queue_size }}"
           # Remote write configuration - required by the chart
           remoteWrite:
             - url: "http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428/api/v1/write"
@@ -415,6 +419,9 @@
           extraArgs:
             promscrape.streamParse: "{{ vmagent_stream_parse }}"
             promscrape.discovery.concurrency: "{{ vmagent_discovery_concurrency }}"
+            # Persist vmagent's remote-write queue across pod restarts, but
+            # cap it so a prolonged outage cannot consume unbounded storage.
+            remoteWrite.maxDiskUsagePerURL: "{{ vmagent_queue_max_disk_usage_bytes }}"
           # Scrape configurations
           # Keep these jobs conservative and explicit. On small Pi nodes, broad
           # auto-discovery can create duplicate targets and memory spikes.

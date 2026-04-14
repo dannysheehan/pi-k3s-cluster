@@ -162,6 +162,19 @@ curl 'http://127.0.0.1:8428/api/v1/label/__name__/values' | grep -E 'cilium|trae
 ./scripts/analyze-probe-pressure.sh
 ```
 
+Queue-specific checks:
+```bash
+kubectl get pvc -n monitoring | grep vmagent
+kubectl exec -n monitoring deploy/vmagent-victoria-metrics-agent -- \
+  wget -qO- http://127.0.0.1:8429/metrics | grep -E 'vmagent_remotewrite|vm_promscrape_targets'
+```
+
+Notes:
+- This repo gives `vmagent` a small persistent remote-write queue (`2Gi`) so
+  short VictoriaMetrics outages do not immediately lose all scraped samples.
+- Queue growth is capped at `2147483648` bytes per remote-write URL. Once full,
+  `vmagent` drops additional samples instead of filling storage indefinitely.
+
 ### VictoriaLogs
 - Log storage and query backend (LogsQL compatible, Loki-compatible ingest).
 - Stores logs under the same `monitoring` namespace as VictoriaMetrics.
@@ -324,6 +337,20 @@ the immediate problem is that kubelet could not reach the Longhorn CSI plugin on
 that node. Treat that as a node / Longhorn control-plane disruption, not an app
 misconfiguration.
 
+If a replacement pod has already been scheduled to a healthy node but you see
+`FailedAttachVolume` with a `Multi-Attach error`, check for a stale Kubernetes
+CSI attachment that still points at the dead node:
+
+```bash
+kubectl get volumeattachments
+kubectl get volumeattachment <attachment-name> -o yaml
+kubectl delete volumeattachment <attachment-name>
+```
+
+That clears the dead-node claim so Longhorn can transition the volume through
+`detaching`/`detached`/`attaching` and then bind it to the replacement pod's
+node.
+
 If `longhorn-driver-deployer` itself is in `CrashLoopBackOff`, collect the real
 error from the node rather than relying on the Kubernetes event text:
 
@@ -352,6 +379,13 @@ Recovery:
 ```bash
 ansible-playbook 03-addons.yml --tags longhorn
 ```
+
+Policy note:
+- This repo intentionally sets Longhorn
+  `node-down-pod-deletion-policy=delete-both-statefulset-and-deployment-pod`
+  so StatefulSets and Deployments are recreated after node loss. If this is
+  changed back to `do-nothing`, dead-node RWO attachments can leave replacement
+  pods stuck in `ContainerCreating` with `Multi-Attach` errors.
 
 References:
 - https://longhorn.io/docs/latest/advanced-resources/os-distro-specific/csi-on-k3s/

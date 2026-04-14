@@ -194,6 +194,40 @@ ansible-playbook 04-monitoring.yml --tags vmagent
 If the pod still dies, reduce scrape load or raise the configured VMAgent
 memory settings in the monitoring playbook inputs.
 
+## 5a. `vmagent` Queue Filled During Remote-Write Outage
+
+Symptom:
+- Grafana metric panels stop advancing even though exporters are still healthy
+- `vmagent` logs show repeated remote-write failures
+- the `vmagent` queue PVC is nearing capacity
+
+### Checks
+
+```bash
+kubectl get pvc -n monitoring | grep vmagent
+kubectl logs -n monitoring -l app.kubernetes.io/instance=vmagent --tail=200
+kubectl exec -n monitoring deploy/vmagent-victoria-metrics-agent -- \
+  wget -qO- http://127.0.0.1:8429/metrics | grep -E 'vmagent_remotewrite|vm_rows'
+```
+
+### Recovery
+
+Restore the VictoriaMetrics write path first, then restart `vmagent` if it does
+not resume sending on its own:
+
+```bash
+ansible-playbook 04-monitoring.yml --tags vmsingle
+ansible-playbook 04-monitoring.yml --tags vmagent
+```
+
+### Notes
+
+- The repo caps `vmagent` queue growth at `2147483648` bytes per remote-write URL.
+- Once the queue fills, `vmagent` drops additional samples rather than growing
+  without bound.
+- Increase the queue size only if you have measured that a larger buffer is
+  worth the extra Longhorn capacity and rebuild pressure.
+
 ## 6. `Multi-Attach` Error On A Persistent Volume
 
 This usually means a `Deployment` with a single Longhorn `ReadWriteOnce` PVC is
@@ -528,3 +562,67 @@ Important:
 - For new or disposable workloads, let them come up on `longhorn-rpi`.
 - Avoid bulk migration of multiple storage-backed apps during a period when
   Longhorn is already rebuilding or a node is flapping.
+
+## 14. Recover A Stateful Workload After A Worker Node Loss
+
+Symptom:
+- a worker disappears or becomes `NotReady`
+- the replacement StatefulSet or Deployment pod is scheduled to a healthy node
+- the pod stays in `ContainerCreating`
+- `kubectl describe pod` shows `FailedAttachVolume` / `Multi-Attach error`
+
+### Root cause
+
+This means the old node's Kubernetes CSI `VolumeAttachment` still claims the
+RWO volume is attached there. Longhorn cannot attach the same volume to the new
+node until that stale attachment is removed.
+
+### Verify
+
+```bash
+kubectl get nodes -o wide
+kubectl -n monitoring describe pod <pod-name>
+kubectl get volumeattachments
+kubectl get volumeattachment <attachment-name> -o yaml
+kubectl -n longhorn-system get volume.longhorn.io <volume-name> -o yaml
+```
+
+What you are looking for:
+- the failed node is `NotReady` or unreachable
+- the replacement pod is on a different node
+- pod events include `Multi-Attach error`
+- the `VolumeAttachment` still points at the dead node and shows `attached: true`
+
+### Recovery
+
+Delete the stale Kubernetes `VolumeAttachment`:
+
+```bash
+kubectl delete volumeattachment <attachment-name>
+```
+
+Then watch the volume and pod recover:
+
+```bash
+kubectl -n longhorn-system get volume.longhorn.io <volume-name> -w
+kubectl -n <namespace> get pod <pod-name> -w
+```
+
+Expected sequence:
+- Longhorn volume moves through `detaching` -> `detached` -> `attaching` -> `attached`
+- the replacement pod moves through `ContainerCreating` -> `Running`
+- volume `robustness` may stay `degraded` until replica rebuild completes
+
+### Follow-up
+
+```bash
+kubectl -n longhorn-system get volume.longhorn.io <volume-name> -o wide
+kubectl -n longhorn-system get replicas.longhorn.io -o wide | grep <volume-name>
+```
+
+Notes:
+- This repo sets Longhorn
+  `node-down-pod-deletion-policy=delete-both-statefulset-and-deployment-pod`
+  so controllers recreate StatefulSet and Deployment pods after a node loss.
+- That setting improves failover behavior, but a stale CSI `VolumeAttachment`
+  can still block reattach and must then be removed manually.

@@ -60,6 +60,11 @@ This project deploys a production-ready Kubernetes cluster on Raspberry Pi hardw
   - Initial requirements and goals
   - Component selection rationale
 
+- **[NMSTATE-EVALUATION.md](NMSTATE-EVALUATION.md)** - Future design note for Kubernetes NMState
+  - Where NMState would fit in this cluster
+  - Why it should be day-2 only, not bootstrap
+  - Example policy and setting-by-setting rationale
+
 - **[DESIGN-REVIEW.md](DESIGN-REVIEW.md)** - Design evolution notes
   - Changes from original design
   - Lessons learned during implementation

@@ -131,7 +131,7 @@ If `longhorn-driver-deployer` is the pod that is crashing, verify the real
 error from the node before changing storage-network settings:
 
 ```bash
-ssh dsheehan@<node-ip>
+ssh <node-ip>
 sudo tee /etc/crictl.yaml >/dev/null <<'EOF'
 runtime-endpoint: unix:///run/k3s/containerd/containerd.sock
 image-endpoint: unix:///run/k3s/containerd/containerd.sock

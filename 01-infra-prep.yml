@@ -160,13 +160,20 @@
         dev: "{{ ssd_path }}"
       when: blkid_result.rc != 0
 
+    - name: Read SSD UUID
+      command: blkid -s UUID -o value {{ ssd_path }}
+      register: ssd_uuid
+      changed_when: false
+
     - name: Mount SSD to /mnt/ssd
       mount:
         path: /mnt/ssd
-        src: "{{ ssd_path }}"
+        src: "UUID={{ ssd_uuid.stdout | trim }}"
         fstype: ext4
         opts: defaults,noatime
         state: mounted
+      # /dev/sdX ordering is not stable on Pi USB storage. Persist the mount by UUID
+      # so the node still boots correctly if the same SSD enumerates as sdb later.
       # /mnt/ssd becomes the root for high-write paths used later by K3s and Longhorn.
 
     - name: Create offload directories

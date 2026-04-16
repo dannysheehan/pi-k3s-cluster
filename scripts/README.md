@@ -73,3 +73,22 @@ Usage:
 chmod +x scripts/analyze-longhorn-replicas.sh
 ./scripts/analyze-longhorn-replicas.sh
 ```
+
+## `check-ssd-health.sh`
+
+Runs a host-level SSD triage pass over SSH: mounted source for `/mnt/ssd`,
+`lsblk`, `blkid`, recent kernel USB/disk errors, SMART output when available,
+and the recent `k3s-agent` journal.
+
+Usage:
+
+```bash
+chmod +x scripts/check-ssd-health.sh
+./scripts/check-ssd-health.sh 192.168.1.45
+```
+
+If auto-detection cannot resolve the block device cleanly, pass it explicitly:
+
+```bash
+./scripts/check-ssd-health.sh 192.168.1.45 /dev/sdb
+```

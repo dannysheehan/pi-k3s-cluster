@@ -355,7 +355,7 @@ If `longhorn-driver-deployer` itself is in `CrashLoopBackOff`, collect the real
 error from the node rather than relying on the Kubernetes event text:
 
 ```bash
-ssh dsheehan@<node-ip>
+ssh <node-ip>
 sudo tee /etc/crictl.yaml >/dev/null <<'EOF'
 runtime-endpoint: unix:///run/k3s/containerd/containerd.sock
 image-endpoint: unix:///run/k3s/containerd/containerd.sock

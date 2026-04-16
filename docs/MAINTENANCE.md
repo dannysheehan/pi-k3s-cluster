@@ -41,7 +41,27 @@ iostat -x 1 5
 
 ```bash
 sudo apt install smartmontools
-sudo smartctl -a /dev/sda
+lsblk -o NAME,TRAN,SIZE,FSTYPE,UUID,MODEL,SERIAL,MOUNTPOINTS
+findmnt /mnt/ssd
+sudo smartctl -a /dev/sdX
+```
+
+Notes:
+- `/dev/sdX` names are not stable on Raspberry Pi USB storage. The same SSD may
+  appear as `/dev/sda` on one boot and `/dev/sdb` on another.
+- Treat the mounted source and UUID as authoritative. Use `findmnt /mnt/ssd`,
+  `blkid`, or `/dev/disk/by-uuid/` instead of assuming `sda`.
+- If a node starts flapping, check recent transport errors before blaming
+  Longhorn:
+
+```bash
+sudo dmesg -T | egrep -i 'I/O error|blk_update|buffer i/o|EXT4-fs error|reset (SuperSpeed|high-speed) USB device|uas|usb-storage|sd[a-z]|scsi' | tail -120
+```
+
+For a repeatable host-side triage pass from the control machine:
+
+```bash
+./scripts/check-ssd-health.sh 192.168.1.45
 ```
 
 ## Storage Usage

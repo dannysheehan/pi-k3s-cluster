@@ -72,20 +72,19 @@
         prompt: "Waiting for K3s server to initialize..."
 
     - name: Wait for API server to be ready
-      ansible.builtin.uri:
-        url: "https://127.0.0.1:6443/healthz"
-        validate_certs: false
-        status_code: 200
+      ansible.builtin.command: kubectl get --raw=/readyz
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       register: api_health
-      until: api_health.status == 200
+      until: api_health.rc == 0
       retries: 30
       delay: 10
-      ignore_errors: true
+      changed_when: false
 
     - name: Display API server status
       ansible.builtin.debug:
         msg: "K3s API server is ready on {{ inventory_hostname }}"
-      when: api_health.status == 200
+      when: api_health.rc == 0
 
 # ============================================================================
 # PHASE 2: VERIFY WORKERS ARE ACCESSIBLE

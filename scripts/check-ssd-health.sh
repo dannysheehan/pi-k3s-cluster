@@ -56,7 +56,10 @@ fi
 
 if command -v smartctl >/dev/null 2>&1 && [[ -n "$device" ]]; then
   printf '\n== SMART %s ==\n' "$device"
-  sudo smartctl -d scsi -a "$device" || true
+  # The USB-SATA bridges on these nodes (0930:1400) only expose real ATA SMART
+  # attributes via SAT passthrough; -d scsi returns a bare health flag with no
+  # wear/reallocation data.
+  sudo smartctl -d sat -a "$device" || sudo smartctl -d scsi -a "$device" || true
 else
   printf '\n== SMART ==\n'
   echo "smartctl unavailable or SSD device could not be resolved"

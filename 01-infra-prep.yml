@@ -170,10 +170,13 @@
         path: /mnt/ssd
         src: "UUID={{ ssd_uuid.stdout | trim }}"
         fstype: ext4
-        opts: defaults,noatime
+        opts: defaults,noatime,nofail,x-systemd.device-timeout=10s
         state: mounted
       # /dev/sdX ordering is not stable on Pi USB storage. Persist the mount by UUID
       # so the node still boots correctly if the same SSD enumerates as sdb later.
+      # nofail + short device timeout keep the node bootable (and reachable over
+      # SSH) if the USB SSD is absent at boot, instead of hanging into emergency
+      # mode (2026-06-30: k3s-wrk-01's SSD dropped off the USB bus mid-flight).
       # /mnt/ssd becomes the root for high-write paths used later by K3s and Longhorn.
 
     - name: Create offload directories
@@ -212,10 +215,12 @@
       mount:
         path: /var
         src: /mnt/ssd/var
-        opts: bind
+        opts: bind,nofail,x-systemd.requires-mounts-for=/mnt/ssd
         state: present
         fstype: none
       notify: Reboot
+      # requires-mounts-for ensures the bind never grabs the empty /mnt/ssd
+      # stub directory on the SD card if the SSD mount was skipped (nofail).
 
     - name: Start rsyslog
       service:

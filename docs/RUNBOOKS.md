@@ -228,6 +228,107 @@ ansible-playbook 04-monitoring.yml --tags vmagent
 - Increase the queue size only if you have measured that a larger buffer is
   worth the extra Longhorn capacity and rebuild pressure.
 
+## 5b. VictoriaMetrics `parts.json` Corruption
+
+Symptom:
+- Grafana metric dashboards are empty or return datasource query errors
+- `vmsingle-victoria-metrics-single-server-0` is in `CrashLoopBackOff`
+- VictoriaMetrics logs show a storage parse failure like:
+
+```text
+FATAL: cannot parse "/storage/data/.../parts.json":
+invalid character '\x00' looking for beginning of value
+```
+
+This means VictoriaMetrics cannot open its on-disk storage. On this cluster,
+metrics retention is short, so quarantining the affected partition is usually
+preferable to leaving the monitoring backend offline.
+
+### Checks
+
+```bash
+kubectl get pods,endpoints -n monitoring -l app.kubernetes.io/instance=vmsingle -o wide
+kubectl logs -n monitoring vmsingle-victoria-metrics-single-server-0 --previous --tail=200
+kubectl get pvc -n monitoring server-volume-vmsingle-victoria-metrics-single-server-0
+```
+
+Confirm the log points at the exact corrupted partition before moving anything.
+Do not delete the PVC as a first response unless losing all retained metrics is
+acceptable.
+
+### Recovery
+
+Scale VictoriaMetrics down so the PVC can be mounted by a temporary repair pod:
+
+```bash
+kubectl scale sts -n monitoring vmsingle-victoria-metrics-single-server --replicas=0
+kubectl wait --for=delete pod/vmsingle-victoria-metrics-single-server-0 \
+  -n monitoring --timeout=180s
+```
+
+Mount the PVC in a temporary pod:
+
+```bash
+kubectl run vmstorage-repair -n monitoring \
+  --image=busybox:1.36 \
+  --restart=Never \
+  --overrides='{"apiVersion":"v1","spec":{"containers":[{"name":"vmstorage-repair","image":"busybox:1.36","command":["sh","-c","sleep 3600"],"volumeMounts":[{"name":"server-volume","mountPath":"/storage"}]}],"volumes":[{"name":"server-volume","persistentVolumeClaim":{"claimName":"server-volume-vmsingle-victoria-metrics-single-server-0"}}]}}'
+
+kubectl wait --for=condition=Ready pod/vmstorage-repair \
+  -n monitoring --timeout=180s
+```
+
+Inspect the corrupted file and quarantine the affected partition directory. This
+example uses the May 2026 small partition from the 2026-06-04 incident; adjust
+the path to match the current log output.
+
+```bash
+kubectl exec -n monitoring vmstorage-repair -- \
+  sh -c 'ls -l /storage/data/small/2026_05/parts.json && od -An -tx1 -N32 /storage/data/small/2026_05/parts.json'
+
+kubectl exec -n monitoring vmstorage-repair -- \
+  sh -c 'set -eu; stamp=$(date +%Y%m%d%H%M%S); mkdir -p /storage/quarantine; mv /storage/data/small/2026_05 /storage/quarantine/2026_05.small.corrupt-parts-json.$stamp'
+```
+
+Remove the repair pod and start VictoriaMetrics:
+
+```bash
+kubectl delete pod -n monitoring vmstorage-repair --wait=true
+kubectl scale sts -n monitoring vmsingle-victoria-metrics-single-server --replicas=1
+kubectl rollout status sts/vmsingle-victoria-metrics-single-server \
+  -n monitoring --timeout=300s
+```
+
+If `vmagent` built a large stale queue while VictoriaMetrics was down, restore
+live dashboards by restarting it after `vmsingle` is healthy:
+
+```bash
+kubectl rollout restart deploy/vmagent-victoria-metrics-agent -n monitoring
+kubectl rollout status deploy/vmagent-victoria-metrics-agent \
+  -n monitoring --timeout=180s
+```
+
+### Verification
+
+```bash
+kubectl get pods,endpoints -n monitoring -l app.kubernetes.io/instance=vmsingle -o wide
+kubectl exec -n monitoring deploy/vmagent-victoria-metrics-agent -- \
+  wget -qO- http://127.0.0.1:8429/metrics | grep -E 'vmagent_remotewrite_pending_data_bytes|vm_persistentqueue_bytes_pending|vmagent_remotewrite_requests_total'
+kubectl exec -n monitoring deploy/vmagent-victoria-metrics-agent -- \
+  wget -qO- 'http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428/api/v1/query?query=up'
+./scripts/verify-cluster.sh
+```
+
+### Notes
+
+- This is a data-loss recovery for the quarantined partition only. The moved
+  directory remains on the PVC under `/storage/quarantine/` until explicitly
+  deleted.
+- Keep the quarantine directory long enough to confirm dashboards and ingestion
+  remain stable.
+- Follow up with Longhorn and disk health checks, because storage corruption may
+  indicate an underlying node, disk, or replica-health problem.
+
 ## 6. `Multi-Attach` Error On A Persistent Volume
 
 This usually means a `Deployment` with a single Longhorn `ReadWriteOnce` PVC is

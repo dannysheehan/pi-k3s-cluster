@@ -701,6 +701,31 @@
             limits:
               cpu: 100m
               memory: 128Mi
+          # Node identity for kernel log records (kmsg has no k8s metadata)
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          # Reading /dev/kmsg requires privileged: CAP_SYSLOG alone is not
+          # enough because the container's device cgroup blocks the char
+          # device (verified: EPERM with SYSLOG cap + unconfined AppArmor,
+          # works privileged). Same approach as node-problem-detector.
+          securityContext:
+            privileged: true
+          # Kernel logs must be read from /dev/kmsg directly, NOT from journald:
+          # persistent journal storage lives on /mnt/ssd/var, so journald dies
+          # with the SSD — exactly when kernel logs matter most (2026-06-30
+          # k3s-wrk-01 SSD disconnect left no local record of the USB event).
+          extraVolumes:
+            - name: kmsg
+              hostPath:
+                path: /dev/kmsg
+                type: CharDevice
+          extraVolumeMounts:
+            - name: kmsg
+              mountPath: /dev/kmsg
+              readOnly: true
           config:
             # Tail all container logs written by containerd (CRI format)
             inputs: |
@@ -712,6 +737,10 @@
                   Mem_Buf_Limit     5MB
                   Skip_Long_Lines   On
                   Refresh_Interval  10
+
+              [INPUT]
+                  Name              kmsg
+                  Tag               kernel.log
             # Enrich log lines with Kubernetes pod/namespace/container metadata
             filters: |
               [FILTER]
@@ -733,6 +762,18 @@
                   Name    modify
                   Match   kube.*
                   Rename  log _msg
+
+              # Kernel records carry the message in 'msg' and no k8s metadata;
+              # rename for VictoriaLogs and stamp the node name.
+              [FILTER]
+                  Name    modify
+                  Match   kernel.*
+                  Rename  msg _msg
+
+              [FILTER]
+                  Name    record_modifier
+                  Match   kernel.*
+                  Record  node ${NODE_NAME}
             # Ship logs to VictoriaLogs via its Loki-compatible ingest endpoint
             outputs: |
               [OUTPUT]
@@ -743,6 +784,16 @@
                   URI               /insert/loki/api/v1/push
                   Labels            job=fluent-bit
                   auto_kubernetes_labels on
+                  Tls               Off
+                  Line_Format       json
+
+              [OUTPUT]
+                  Name              loki
+                  Match             kernel.*
+                  Host              vlogs-victoria-logs-single-server.monitoring.svc
+                  Port              9428
+                  URI               /insert/loki/api/v1/push
+                  Labels            job=kernel-logs, node=${NODE_NAME}
                   Tls               Off
                   Line_Format       json
       tags: [monitoring, fluent-bit]

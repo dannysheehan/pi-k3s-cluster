@@ -13,8 +13,9 @@ Ansible playbooks for deploying and managing a K3s cluster on Raspberry Pi 4 har
 - **VictoriaMetrics + VictoriaLogs + Grafana** for metrics+logs observability
   - VictoriaMetrics: metrics TSDB (PromQL compatible)
   - VictoriaLogs: log storage (LogsQL, Loki-compatible ingest)
-  - Fluent Bit: log shipper DaemonSet on all nodes
+  - Fluent Bit: log shipper DaemonSet on all nodes (container logs + `/dev/kmsg` kernel logs — runs privileged, required for kmsg)
   - Grafana: unified dashboards for both metrics and logs
+  - vmalert + Alertmanager + kube-state-metrics: alert rules pushed to ntfy.sh — see [docs/ALERTING.md](docs/ALERTING.md)
 
 ## Environment Setup
 
@@ -85,12 +86,14 @@ The cluster has four layers that must be deployed in order and diagnosed bottom-
 
 - [group_vars/all.yml](group_vars/all.yml): Single source of truth for all component versions (`k3s_version`, `cilium_version`, `longhorn_version`, etc.) and cluster-wide settings (`master_ip`, network ranges, monitoring sizing)
 - [hosts.ini](hosts.ini): Node inventory with `storage_ip` and `storage_mac` for each node's USB Ethernet adapter (used by the storage network setup)
-- [ansible.cfg](ansible.cfg): `become_ask_pass = True` — sudo password will be prompted on every playbook run
+- [ansible.cfg](ansible.cfg): `become_ask_pass = True` — sudo password will be prompted on every playbook run. For plays that don't need root (e.g. `04-monitoring.yml`, which is all kubeconfig/helm on localhost), run with `ANSIBLE_BECOME=False ANSIBLE_BECOME_ASK_PASS=False` to skip the prompt
+- **Secrets**: sensitive vars in `group_vars/all.yml` are inline `!vault` strings (e.g. `ntfy_topic`); the vault password file is `~/.ansible/vault-pass-pi-cluster` (outside the repo, wired via `vault_password_file` in ansible.cfg — decryption is automatic). Never add plaintext secrets; see "Secrets Management" in [docs/MAINTENANCE.md](docs/MAINTENANCE.md)
 
 ## Storage Architecture
 
 - OS runs on SD card; all heavy-write paths are on USB SSD mounted at `/mnt/ssd`
 - K3s data: `/mnt/ssd/k3s`; Longhorn volumes: `/mnt/ssd/longhorn`; entire `/var` is bind-mounted from `/mnt/ssd/var`
+- fstab mounts are UUID-based with `nofail` (a node with a dead SSD still boots reachable), and a systemd drop-in (`10-require-ssd.conf`, from `01-infra-prep.yml`) blocks K3s from starting unless `/mnt/ssd` is actually mounted — otherwise K3s writes to the SD card through the empty stub dir (bit us on 2026-07-05, see incident docs). USB-SATA bridge dropouts are a known fleet-wide failure mode: two incidents in 5 days (`docs/INCIDENT-2026-06-30-WRK01-SSD-DISCONNECT.md`)
 - Storage replication traffic uses a dedicated network (`192.168.10.0/24`) via USB Ethernet adapters, isolated from application traffic
 
 ## Storage NAD: Bridge, Not ipvlan

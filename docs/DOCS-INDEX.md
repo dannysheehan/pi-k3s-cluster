@@ -15,6 +15,11 @@ This project deploys a production-ready Kubernetes cluster on Raspberry Pi hardw
   - Quick cluster verification helper
   - Kubeconfig override pattern
 
+### Operations Guides
+- **[ALERTING.md](ALERTING.md)** - vmalert + Alertmanager + ntfy push alerts
+  - Rule catalog, how to add/test rules, silencing, known gaps
+  - End-to-end delivery test commands
+
 ### Reviews & Incidents
 - **[BEST-PRACTICES-REVIEW-2026-07.md](BEST-PRACTICES-REVIEW-2026-07.md)** - Full cluster review and improvement plan
   - Findings from 216 days of operation and two incidents

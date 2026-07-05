@@ -2,6 +2,44 @@
 
 Routine maintenance procedures for the Raspberry Pi K3s cluster.
 
+## Secrets Management (Ansible Vault)
+
+Sensitive values in `group_vars/all.yml` are stored as inline
+`!vault`-encrypted strings (currently: `ntfy_topic`,
+`healthchecks_heartbeat_url`, `healthchecks_watchdog_url`). Set up 2026-07-05.
+The healthchecks.io API key (used only for managing checks, not by playbooks)
+lives at `~/.ansible/healthchecks-api-key` — back it up alongside the vault
+password.
+
+**The vault password lives outside the repo** at
+`~/.ansible/vault-pass-pi-cluster` (mode 0600), wired up via
+`vault_password_file` in `ansible.cfg`, so playbook runs decrypt
+transparently — no `--ask-vault-pass` needed.
+
+> **Back that file up** (password manager or offline copy). If it is lost,
+> vaulted values cannot be decrypted; you would have to recreate each secret
+> and re-encrypt with a new password.
+
+```bash
+# View a vaulted variable (inline strings can't use `ansible-vault view`)
+ansible k3s-wrk-01 -m debug -a var=ntfy_topic
+
+# Encrypt a new secret, then paste the output into group_vars/all.yml
+ansible-vault encrypt_string 'the-secret-value' --name my_var_name
+
+# Rotate a secret: re-run encrypt_string with the new value and replace the
+# !vault block. Rotate the vault password itself with:
+ansible-vault rekey <file>   # only for whole-file vaults; for inline strings,
+                             # re-encrypt each one after changing the password file
+```
+
+Rules of thumb:
+
+- Never commit a plaintext secret "temporarily" — encrypt first, commit after.
+- Check with `git log -S '<value>'` if unsure whether a value ever hit history.
+- Known debt: `grafana_admin_password` is still plaintext in
+  `group_vars/all.yml` (finding D1 in the best-practices review).
+
 ## Backup etcd (Control Plane Data)
 
 ```bash

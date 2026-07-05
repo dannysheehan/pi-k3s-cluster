@@ -595,6 +595,27 @@
                   - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
                     regex: kube-state-metrics
                     action: keep
+
+              # Self-monitoring: vmalert rules on the pipeline itself (vmagent
+              # queue growth, vmsingle down) need these series to exist.
+              - job_name: vmsingle
+                static_configs:
+                  - targets:
+                      - vmsingle-victoria-metrics-single-server.monitoring.svc:8428
+
+              # vmagent has no Service; discover its pod directly.
+              - job_name: vmagent
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names: [monitoring]
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+                    regex: vmagent
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_container_port_number]
+                    regex: "8429"
+                    action: keep
       tags: [monitoring, vmagent]
 
     # vmagent is lightweight, but on an already busy worker it can still miss
@@ -680,6 +701,293 @@
         (vmagent_deploy.resources[0].status.readyReplicas | default(0)) !=
         (vmagent_deploy.resources[0].status.replicas | default(1))
       tags: [monitoring, vmagent]
+
+    # ========================================================================
+    # KUBE-STATE-METRICS - Kubernetes object metrics (node conditions etc.)
+    # The vmagent scrape job for it has existed since initial deployment; this
+    # supplies the actual exporter. Needed for the NodeNotReady alert.
+    # ========================================================================
+    - name: Install kube-state-metrics
+      kubernetes.core.helm:
+        name: kube-state-metrics
+        chart_ref: prometheus-community/kube-state-metrics
+        chart_version: "{{ kube_state_metrics_chart_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 300s
+        values:
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      tags: [monitoring, vmalert, kube-state-metrics]
+
+    # ========================================================================
+    # VMALERT + ALERTMANAGER - Alert evaluation and ntfy push notifications
+    # vmalert evaluates rules against vmsingle; Alertmanager routes to ntfy.sh
+    # directly using ntfy message templating (no bridge component needed —
+    # the URL query params below are URL-encoded Go templates rendered by
+    # ntfy from Alertmanager's webhook JSON; tested end-to-end 2026-07-05).
+    # Alertmanager is deliberately not persisted to Longhorn: the alerting
+    # path must not depend on the storage it alerts about. Losing silences on
+    # restart is an acceptable trade.
+    # NOTE: if vmsingle itself is hard-down, vmalert evaluates nothing and no
+    # alert fires — that gap is covered by the external dead-man's switch
+    # (best-practices review, finding A3), not by rules here.
+    # ========================================================================
+    - name: Install VictoriaMetrics Alert (vmalert + Alertmanager)
+      kubernetes.core.helm:
+        name: vmalert
+        chart_ref: vm/victoria-metrics-alert
+        chart_version: "{{ vmalert_chart_version }}"
+        release_namespace: monitoring
+        create_namespace: false
+        kubeconfig: "{{ kubeconfig }}"
+        timeout: 300s
+        values:
+          server:
+            resources:
+              requests:
+                cpu: 20m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 128Mi
+            datasource:
+              url: http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428
+            notifier:
+              url: http://vmalert-victoria-metrics-alert-alertmanager.monitoring.svc:9093
+            config:
+              alerts:
+                groups:
+                  - name: node-health
+                    interval: 30s
+                    rules:
+                      - alert: NodeNotReady
+                        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+                        for: 5m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'Node {{ $labels.node }} has been NotReady for 5 minutes'
+                      - alert: NodeScrapeTargetDown
+                        expr: up{job="node-exporter"} == 0
+                        for: 5m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'node-exporter on {{ $labels.instance }} unreachable for 5m (node down or exporter broken)'
+                      - alert: FilesystemDeviceError
+                        expr: node_filesystem_device_error{mountpoint=~"/|/mnt/ssd|/var"} > 0
+                        for: 2m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'Filesystem errors on {{ $labels.instance }} {{ $labels.mountpoint }} — SSD may have dropped off the bus (runbook: INCIDENT-2026-06-30)'
+                  - name: storage
+                    interval: 30s
+                    rules:
+                      - alert: LonghornVolumeDegraded
+                        expr: longhorn_volume_robustness == 2
+                        for: 10m
+                        labels:
+                          severity: warning
+                        annotations:
+                          summary: !unsafe 'Longhorn volume {{ $labels.volume }} is degraded (replica lost, rebuild not completing)'
+                      - alert: LonghornVolumeFaulted
+                        expr: longhorn_volume_robustness == 3
+                        for: 1m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'Longhorn volume {{ $labels.volume }} is FAULTED — data unavailable'
+                      - alert: PVCSpaceLow
+                        expr: kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.15
+                        for: 15m
+                        labels:
+                          severity: warning
+                        annotations:
+                          summary: !unsafe 'PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} below 15% free'
+                      - alert: PVCSpaceCritical
+                        expr: kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.05
+                        for: 5m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} below 5% free — imminent write failures'
+                  - name: monitoring-pipeline
+                    interval: 30s
+                    rules:
+                      - alert: VMSingleDown
+                        expr: up{job="vmsingle"} == 0
+                        for: 3m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: 'VictoriaMetrics (vmsingle) scrape failing — metrics backend down or flapping'
+                      - alert: VMAgentDown
+                        expr: up{job="vmagent"} == 0
+                        for: 5m
+                        labels:
+                          severity: warning
+                        annotations:
+                          summary: 'vmagent scrape failing — metric collection degraded'
+                      - alert: VMAgentQueueHigh
+                        expr: vmagent_remotewrite_pending_data_bytes > 268435456
+                        for: 10m
+                        labels:
+                          severity: warning
+                        annotations:
+                          summary: !unsafe 'vmagent remote-write queue above 256MiB ({{ $value | humanize1024 }}B) — vmsingle slow or unreachable'
+                      - alert: VMAgentQueueCritical
+                        expr: vmagent_remotewrite_pending_data_bytes > 1073741824
+                        for: 10m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'vmagent remote-write queue above 1GiB ({{ $value | humanize1024 }}B) — sustained ingestion failure'
+                  - name: meta
+                    interval: 30s
+                    rules:
+                      # Always-firing heartbeat for the alerting pipeline
+                      # itself. Routed to healthchecks.io (NOT ntfy) — if
+                      # vmsingle, vmalert, or Alertmanager breaks, the pings
+                      # stop and healthchecks.io alerts from outside.
+                      - alert: Watchdog
+                        expr: vector(1)
+                        labels:
+                          severity: watchdog
+                        annotations:
+                          summary: 'Alerting pipeline heartbeat (expected to fire forever)'
+                  - name: certificates
+                    interval: 5m
+                    rules:
+                      - alert: APIClientCertExpirySoon
+                        expr: >-
+                          histogram_quantile(0.01,
+                            sum by (le) (rate(apiserver_client_certificate_expiration_seconds_bucket[5m])))
+                          < 30 * 86400
+                        for: 1h
+                        labels:
+                          severity: warning
+                        annotations:
+                          summary: 'API server client certificates expiring within 30 days — check k3s cert rotation'
+          alertmanager:
+            enabled: true
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 128Mi
+            config:
+              global:
+                resolve_timeout: 5m
+              route:
+                receiver: ntfy
+                group_by: [alertname]
+                group_wait: 30s
+                group_interval: 5m
+                repeat_interval: 6h
+                routes:
+                  # Watchdog goes ONLY to healthchecks.io (first match wins).
+                  # repeat_interval controls the ping cadence; the check is
+                  # configured with period 15m + grace 15m, so pings every
+                  # ~10m keep it green with margin.
+                  - receiver: healthchecks
+                    matchers:
+                      - alertname = "Watchdog"
+                    group_wait: 15s
+                    group_interval: 10m
+                    repeat_interval: 10m
+                  - receiver: ntfy
+                    matchers:
+                      - severity = "warning"
+                    repeat_interval: 24h
+              receivers:
+                - name: healthchecks
+                  webhook_configs:
+                    - url: "{{ healthchecks_watchdog_url }}"
+                      send_resolved: false
+                - name: ntfy
+                  webhook_configs:
+                    # ntfy renders these URL-encoded Go templates against the
+                    # Alertmanager webhook JSON. Decoded:
+                    #   title:    {{if eq .status "firing"}}🔥{{else}}✅{{end}} {{.commonLabels.alertname}} [{{.commonLabels.severity}}]
+                    #   message:  {{range .alerts}}{{.annotations.summary}}\n{{end}}
+                    #   priority: urgent for critical, default otherwise
+                    - url: "{{ ntfy_server }}/{{ ntfy_topic }}?tpl=yes&title=%7B%7Bif%20eq%20.status%20%22firing%22%7D%7D%F0%9F%94%A5%7B%7Belse%7D%7D%E2%9C%85%7B%7Bend%7D%7D%20%7B%7B.commonLabels.alertname%7D%7D%20%5B%7B%7B.commonLabels.severity%7D%7D%5D&message=%7B%7Brange%20.alerts%7D%7D%7B%7B.annotations.summary%7D%7D%0A%7B%7Bend%7D%7D&priority=%7B%7Bif%20eq%20.commonLabels.severity%20%22critical%22%7D%7Durgent%7B%7Belse%7D%7Ddefault%7B%7Bend%7D%7D"
+                      send_resolved: true
+      tags: [monitoring, vmalert]
+
+    - name: Wait for vmalert and Alertmanager to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        namespace: monitoring
+        label_selectors:
+          - "app.kubernetes.io/instance=vmalert"
+      register: vmalert_pods
+      until: >
+        vmalert_pods.resources | default([]) | length >= 2 and
+        (vmalert_pods.resources | map(attribute='status.phase') | list | unique == ['Running'])
+      retries: 30
+      delay: 10
+      tags: [monitoring, vmalert]
+
+    # ========================================================================
+    # DEAD-MAN'S SWITCH - external cluster heartbeat (healthchecks.io)
+    # If the whole cluster (or just CronJob scheduling) dies, pings stop and
+    # healthchecks.io alerts from OUTSIDE the cluster. Complements the
+    # Watchdog alert above, which covers the alerting pipeline specifically.
+    # Check config: period 5m, grace 5m -> alerted ~10m after cluster death.
+    # ========================================================================
+    - name: Deploy cluster heartbeat CronJob
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: batch/v1
+          kind: CronJob
+          metadata:
+            name: cluster-heartbeat
+            namespace: monitoring
+          spec:
+            schedule: "*/5 * * * *"
+            concurrencyPolicy: Replace
+            successfulJobsHistoryLimit: 1
+            failedJobsHistoryLimit: 3
+            jobTemplate:
+              spec:
+                activeDeadlineSeconds: 120
+                backoffLimit: 2
+                template:
+                  spec:
+                    restartPolicy: Never
+                    containers:
+                      - name: ping
+                        # Image already cached on all nodes (Grafana init uses it)
+                        image: docker.io/curlimages/curl:7.85.0
+                        args:
+                          - -fsS
+                          - --max-time
+                          - "10"
+                          - --retry
+                          - "3"
+                          - "{{ healthchecks_heartbeat_url }}"
+                        resources:
+                          requests:
+                            cpu: 10m
+                            memory: 16Mi
+                          limits:
+                            cpu: 50m
+                            memory: 32Mi
+      tags: [monitoring, vmalert, heartbeat]
 
     # ========================================================================
     # FLUENT BIT - Log shipper DaemonSet

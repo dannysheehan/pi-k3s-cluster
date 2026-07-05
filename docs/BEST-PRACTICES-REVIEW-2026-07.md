@@ -333,10 +333,16 @@ precede Phase 3: **backups before rebuild**.
 
 ### Phase 0 — Quick wins (a weekend, no downtime)
 
-1. Deploy vmalert + Alertmanager + ntfy; port `verify-cluster.sh` checks to
-   rules (node NotReady >5m, `node_filesystem_device_error`, Longhorn volume
-   degraded, vmsingle endpoints, vmagent queue, PVC >80%).
-2. External dead-man's switch (CronJob → healthchecks.io + Watchdog route).
+1. ~~Deploy vmalert + Alertmanager + ntfy~~ **Done 2026-07-05**: vmalert +
+   Alertmanager via `vm/victoria-metrics-alert` chart (`--tags vmalert`),
+   kube-state-metrics added, Alertmanager posts straight to ntfy.sh using
+   ntfy message templating (no bridge). 12 rules across node-health, storage,
+   monitoring-pipeline, and certificates groups; critical alerts push at
+   urgent priority. Verified end-to-end.
+2. ~~External dead-man's switch~~ **Done 2026-07-05**: two healthchecks.io
+   checks — `pi-cluster-heartbeat` (CronJob, 5m) and
+   `pi-cluster-alerting-watchdog` (always-firing Watchdog rule routed from
+   Alertmanager, ~10m). Ping URLs vaulted. See `docs/ALERTING.md`.
 3. Move the Grafana password out of Git (first SOPS-encrypted secret).
 4. Fluent Bit + node-exporter control-plane tolerations.
 5. `lsusb -t` audit of storage-NIC bus placement (B5); document the outcome.

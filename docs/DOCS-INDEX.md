@@ -15,6 +15,14 @@ This project deploys a production-ready Kubernetes cluster on Raspberry Pi hardw
   - Quick cluster verification helper
   - Kubeconfig override pattern
 
+### Reviews & Incidents
+- **[BEST-PRACTICES-REVIEW-2026-07.md](BEST-PRACTICES-REVIEW-2026-07.md)** - Full cluster review and improvement plan
+  - Findings from 216 days of operation and two incidents
+  - Phased plan: alerting, backups/NAS, security, rebuild blueprint
+  - Recommended additional components with Pi-sized footprints
+- **[INCIDENT-2026-06-04-GRAFANA-DASHBOARDS.md](INCIDENT-2026-06-04-GRAFANA-DASHBOARDS.md)** - VictoriaMetrics storage corruption incident
+- **[INCIDENT-2026-06-30-WRK01-SSD-DISCONNECT.md](INCIDENT-2026-06-30-WRK01-SSD-DISCONNECT.md)** - USB SSD disconnect and 4.5-day node outage
+
 ### Reference Documents
 - **[CLUSTER-SETUP-SUMMARY.md](CLUSTER-SETUP-SUMMARY.md)** - Final configuration reference
   - Complete architecture details

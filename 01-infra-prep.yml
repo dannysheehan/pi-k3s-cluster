@@ -222,6 +222,36 @@
       # requires-mounts-for ensures the bind never grabs the empty /mnt/ssd
       # stub directory on the SD card if the SSD mount was skipped (nofail).
 
+    # With nofail, a node whose SSD is dead still boots — but K3s must NOT
+    # start in that state or it writes fresh state to the SD card through the
+    # empty /mnt/ssd stub and reports Ready with no real storage (seen on
+    # k3s-wrk-04, 2026-07-05). Drop-ins are valid even before the K3s unit
+    # exists (02-k3s-install.yml runs later), so create both variants.
+    - name: Create K3s systemd drop-in directories
+      file:
+        path: "/etc/systemd/system/{{ item }}.service.d"
+        state: directory
+        mode: '0755'
+      loop:
+        - k3s
+        - k3s-agent
+
+    - name: Require SSD mount before K3s starts
+      copy:
+        dest: "/etc/systemd/system/{{ item }}.service.d/10-require-ssd.conf"
+        mode: '0644'
+        content: |
+          [Unit]
+          # Never start K3s without the SSD: with nofail in fstab a node can
+          # boot without /mnt/ssd, and K3s would silently write to the SD card
+          # through the empty stub directory (seen on k3s-wrk-04, 2026-07-05).
+          RequiresMountsFor=/mnt/ssd
+          ConditionPathIsMountPoint=/mnt/ssd
+      loop:
+        - k3s
+        - k3s-agent
+      notify: Reload systemd
+
     - name: Start rsyslog
       service:
         name: rsyslog
@@ -262,5 +292,8 @@
   handlers:
     - name: Apply Netplan
       command: netplan apply
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
     - name: Reboot
       reboot:

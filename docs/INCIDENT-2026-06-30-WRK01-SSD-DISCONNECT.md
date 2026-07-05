@@ -256,6 +256,31 @@ pre-failure indicators. Run it now against the recovered drive on
 - [x] Re-run `./scripts/verify-cluster.sh` after the vmagent queue drains —
       all checks pass, queue at 0 bytes (2026-07-05).
 
+## Recurrence: 2026-07-05, k3s-wrk-04
+
+Five days after this incident, `k3s-wrk-04`'s SSD dropped off the USB bus the
+same way (11:51 AEST, ~4h after a reboot). Differences worth recording:
+
+- **The kernel-log shipping added above worked**: VictoriaLogs captured the
+  full disconnect sequence that was unrecoverable for wrk-01 — USB 3
+  disconnect, failed port power-cycles ("Cannot enable. Maybe the USB cable
+  is bad?"), failed USB 2 fallback enumeration (errors -110/-71). The bridge
+  crashed and could not re-negotiate at either speed; a soft reboot did not
+  recover it (physical power-cycle required, as with wrk-01).
+- **A new failure mode surfaced**: with `nofail` in fstab, the node rebooted
+  cleanly without the SSD — and `k3s-agent` started anyway, wrote ~206 MB of
+  fresh state to the SD card through the empty `/mnt/ssd` stub, and reported
+  the node `Ready` with no real storage. Contained by cordon + stop + stub
+  cleanup. Permanent fix: systemd drop-in
+  (`10-require-ssd.conf`: `RequiresMountsFor=/mnt/ssd` +
+  `ConditionPathIsMountPoint=/mnt/ssd`) applied to all five nodes and added
+  to `01-infra-prep.yml`. Verified: a start attempt without the SSD now
+  fails its dependency job and K3s stays inactive.
+- Two identical enclosures failing identically in five days makes this a
+  **systemic fleet problem** — see finding B1 in
+  `docs/BEST-PRACTICES-REVIEW-2026-07.md` (enclosure replacement /
+  Pi 5 + NVMe), whose priority this recurrence raises.
+
 ## Related Documentation
 
 - `docs/RUNBOOKS.md`

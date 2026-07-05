@@ -67,7 +67,7 @@ pings stop:
 | Check | Pinged by | Cadence | Alerts after | Silence means |
 |---|---|---|---|---|
 | `pi-cluster-heartbeat` | `cronjob/cluster-heartbeat` (monitoring ns) | 5m | ~10m (period 5m + grace 5m) | Cluster / scheduling down |
-| `pi-cluster-alerting-watchdog` | Alertmanager `Watchdog` route (always-firing `vector(1)` rule) | ~10m | ~30m (period 15m + grace 15m) | Alerting pipeline broken (even if cluster is up) |
+| `pi-cluster-alerting-watchdog` | Alertmanager `Watchdog` route (always-firing `vector(1)` rule) | ~5m | ~30m (period 15m + grace 15m) | Alerting pipeline broken (even if cluster is up) |
 
 Config lives in `04-monitoring.yml` (rule group `meta`, the `healthchecks`
 receiver/route, and the CronJob task). Ping URLs are vault-encrypted in

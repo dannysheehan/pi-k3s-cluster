@@ -161,29 +161,41 @@
     # -------------------------------------------------------------------------
     # Prerequisite Validation
     # -------------------------------------------------------------------------
-    - name: Check if SSD mount point exists
-      stat:
-        path: /mnt/ssd
+    # With nofail in fstab (01-infra-prep.yml), /mnt/ssd always EXISTS as a
+    # directory even when the SSD is dead — a stat/exists check passes on the
+    # empty SD-card stub and K3s would install onto the SD card (this bit
+    # k3s-wrk-04 on 2026-07-05). Check for a real mountpoint instead.
+    - name: Check /mnt/ssd is a real mountpoint (not the SD-card stub)
+      command: findmnt -n /mnt/ssd
       register: ssd_mount
+      changed_when: false
+      failed_when: false
 
     - name: Check if K3s directory exists on SSD
       stat:
         path: /mnt/ssd/k3s
       register: ssd_k3s_dir
 
+    - name: Check K3s SSD-guard drop-in exists
+      stat:
+        path: /etc/systemd/system/k3s.service.d/10-require-ssd.conf
+      register: ssd_guard
+
     - name: Fail if infrastructure not prepared
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ERROR: Infrastructure not prepared on {{ inventory_hostname }}  ║
           ╠══════════════════════════════════════════════════════════════════╣
-          ║  The SSD is not mounted or K3s directory doesn't exist.          ║
+          ║  /mnt/ssd is not a mounted filesystem, the K3s directory is      ║
+          ║  missing, or the SSD systemd guard (10-require-ssd.conf) is      ║
+          ║  absent.                                                         ║
           ║                                                                  ║
           ║  Please run infrastructure preparation first:                    ║
           ║    ansible-playbook 01-infra-prep.yml --limit {{ inventory_hostname }}
           ╚══════════════════════════════════════════════════════════════════╝
-      when: not ssd_mount.stat.exists or not ssd_k3s_dir.stat.exists
+      when: ssd_mount.rc != 0 or not ssd_k3s_dir.stat.exists or not ssd_guard.stat.exists
 
     # -------------------------------------------------------------------------
     # Idempotency Check - Skip if Already Joined

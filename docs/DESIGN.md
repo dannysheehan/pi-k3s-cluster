@@ -27,6 +27,16 @@ The stability of the cluster relies on protecting the SD cards from write exhaus
 
 ### **1.2 SSD Preparation and I/O Offloading**
 
+> **⚠️ Superseded (2026-07-05):** the fstab examples below are the original
+> design and are now outdated. The current standard (implemented in
+> `01-infra-prep.yml`) mounts by **UUID** (not `/dev/sdX` — device names are
+> unstable on Pi USB) with `nofail,x-systemd.device-timeout=10s`, binds the
+> **entire `/var`** (not just `/var/log`) with
+> `x-systemd.requires-mounts-for=/mnt/ssd`, and installs a systemd drop-in
+> that blocks K3s from starting when the SSD is unmounted. Rationale:
+> `docs/INCIDENT-2026-06-30-WRK01-SSD-DISCONNECT.md`. Do not copy the fstab
+> lines below onto a node.
+
 This is the most critical step for the hybrid strategy. We will format the SSDs and configure the system to mount them as the primary data stores, using **bind mounts** to seamlessly offload standard system directories like /var/log.
 
 1. Format the SSD:

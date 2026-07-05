@@ -896,15 +896,18 @@
                 repeat_interval: 6h
                 routes:
                   # Watchdog goes ONLY to healthchecks.io (first match wins).
-                  # repeat_interval controls the ping cadence; the check is
-                  # configured with period 15m + grace 15m, so pings every
-                  # ~10m keep it green with margin.
+                  # Ping cadence = group_interval ticks where repeat_interval
+                  # has elapsed; repeat_interval MUST be strictly less than
+                  # group_interval or drift doubles the effective cadence
+                  # (observed 2026-07-05: 10m/10m produced ~20m pings and the
+                  # check fell into grace). 5m/4m -> a ping every ~5m against
+                  # the check's 15m period + 15m grace.
                   - receiver: healthchecks
                     matchers:
                       - alertname = "Watchdog"
                     group_wait: 15s
-                    group_interval: 10m
-                    repeat_interval: 10m
+                    group_interval: 5m
+                    repeat_interval: 4m
                   - receiver: ntfy
                     matchers:
                       - severity = "warning"

@@ -110,6 +110,13 @@
     # These flags intentionally leave networking/inress incomplete until 03-addons.yml.
     # A NotReady node immediately after this play is expected.
   tasks:
+    # /mnt/ssd is nofail (01-infra-prep.yml): the directory exists even when
+    # the SSD is dead, so verify it is a real mountpoint before installing —
+    # otherwise K3s data lands on the SD card through the empty stub.
+    - name: Verify /mnt/ssd is a real mountpoint
+      command: findmnt -n /mnt/ssd
+      changed_when: false
+
     - name: Install K3s on Control Plane
       shell: |
         curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ k3s_version }} sh -s - server \
@@ -141,6 +148,11 @@
     # duplicate password/hostname conflicts when rejoining.
     k3s_args: "--data-dir /mnt/ssd/k3s --with-node-id --node-name {{ inventory_hostname }}"
   tasks:
+    # See the identical check in the control-plane play above.
+    - name: Verify /mnt/ssd is a real mountpoint
+      command: findmnt -n /mnt/ssd
+      changed_when: false
+
     - name: Wait for control plane node-token to exist
       stat:
         path: /mnt/ssd/k3s/server/node-token

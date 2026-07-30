@@ -39,16 +39,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Provide dummy vault password file path
-        # ansible.cfg points at ~/.ansible/vault-pass-pi-cluster. Public CI
-        # must not have the real password; syntax-check is skipped in .ansible-lint.
-        run: |
-          mkdir -p "${HOME}/.ansible"
-          echo 'ci-lint-dummy-not-a-real-vault-password' > "${HOME}/.ansible/vault-pass-pi-cluster"
-          chmod 600 "${HOME}/.ansible/vault-pass-pi-cluster"
-
       - name: Run ansible-lint
         uses: ansible/ansible-lint@v25.12.2
+        env:
+          # Avoid workstation vault_password_file from ansible.cfg on public CI
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ansible.ci.cfg
         with:
           setup_python: "true"
           requirements_file: requirements.yml

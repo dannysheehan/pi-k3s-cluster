@@ -23,6 +23,8 @@ skip_list:
   - partial-become
   # Inline vault strings and long helm value blocks trip name/yaml noise
   - yaml[line-length]
+  # syntax-check needs the real vault password (offline on CI / public runners)
+  - syntax-check
 
 warn_list:
   - experimental

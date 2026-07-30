@@ -35,7 +35,7 @@
     - name: Fail if no --limit specified
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ERROR: You must specify --limit to target specific nodes        ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -158,7 +158,7 @@
           ✓ Node {{ matched_node_name | default(inventory_hostname) }} is already joined to the cluster
           ✓ Agent status: {{ 'running' if (agent_status.rc | default(1)) == 0 else 'not running' }}
           ✓ Node ready: {{ matched_node_ready | default('unknown') }}
-          
+
           Skipping installation - node is healthy.
       when: already_joined
 
@@ -237,7 +237,7 @@
     - name: Display success message
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ✓ Successfully added {{ inventory_hostname }} to the cluster    ║
           ╠══════════════════════════════════════════════════════════════════╣

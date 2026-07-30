@@ -63,7 +63,7 @@
     - name: Fail if cluster already exists (unless force_reinstall=true)
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ⚠️  CLUSTER ALREADY EXISTS - ABORTING                           ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -84,7 +84,7 @@
     - name: Display warning for force reinstall
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ⚠️  FORCE REINSTALL MODE - PROCEEDING WITH CAUTION              ║
           ╠══════════════════════════════════════════════════════════════════╣

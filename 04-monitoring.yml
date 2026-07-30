@@ -1501,24 +1501,24 @@
           ============================================================
           VICTORIA METRICS MONITORING STACK DEPLOYED SUCCESSFULLY
           ============================================================
-          
+
           Grafana:
             URL: http://192.168.1.200/grafana
             Username: admin
             Password: {{ grafana_admin_password }}
             Datasources: VictoriaMetrics (default) + VictoriaLogs
-          
+
           Victoria Metrics (port-forward):
             kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
             Then access: http://localhost:8428
-          
+
           VictoriaLogs Web UI:
             URL: http://192.168.1.200/victorialogs/select/vmui/
 
           VictoriaLogs (port-forward / direct API):
             kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428
             Then access: http://localhost:9428/select/vmui/
-          
+
           Pre-installed Dashboards:
             - Node Exporter Full (ID: 1860)
             - Kubernetes Cluster Overview (ID: 7249)
@@ -1526,12 +1526,12 @@
             - Traefik (ID: 17346)
             - Cilium Agent (ID: 16611)
             - Hubble (ID: 16612)
-          
+
           Storage:
             - Victoria Metrics: {{ vm_storage_size }} ({{ vm_retention }} retention)
             - VictoriaLogs:     {{ victorialogs_storage_size }} ({{ victorialogs_retention }} retention)
             - Grafana:          {{ grafana_storage_size }}
-          
+
           Resource Usage (Total):
             - CPU Requests: ~500m
             - Memory Requests: ~896Mi

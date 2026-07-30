@@ -39,7 +39,7 @@
     - name: Fail if no --limit specified
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ERROR: You must specify --limit to target specific nodes        ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -99,7 +99,7 @@
     - name: Display removal plan
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  Removing {{ inventory_hostname }} from cluster                  ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -143,7 +143,7 @@
         msg: |
           ⚠️  WARNING: Drain failed or timed out
           {{ drain_result.stderr | default('') }}
-          
+
           Continuing with removal. Some pods may be forcefully terminated.
           Use -e force_drain=true to force drain, or -e skip_drain=true to skip.
       when: node_in_cluster and not skip_drain and drain_result.rc != 0
@@ -219,7 +219,7 @@
     - name: Display completion message
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ✓ Successfully removed {{ inventory_hostname }}                 ║
           ╠══════════════════════════════════════════════════════════════════╣

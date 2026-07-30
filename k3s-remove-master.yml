@@ -46,7 +46,7 @@
     - name: Fail if no --limit specified
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ERROR: You must specify --limit to target specific nodes        ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -110,7 +110,7 @@
     - name: Fail if trying to remove last master
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ERROR: Cannot remove the last master node!                      ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -126,7 +126,7 @@
     - name: Warn if removing will lose HA
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ⚠️  WARNING: Removing this master will reduce HA capability     ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -141,7 +141,7 @@
     - name: Warn if removing first master
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ⚠️  WARNING: Removing the first/primary master                  ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -156,7 +156,7 @@
     - name: Display removal plan
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  Master Removal Plan                                             ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -201,7 +201,7 @@
     - name: Display removal status
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  Removing {{ inventory_hostname }} from cluster                  ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -353,7 +353,7 @@
     - name: Display completion message
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ✓ Successfully removed {{ inventory_hostname }}                 ║
           ╠══════════════════════════════════════════════════════════════════╣

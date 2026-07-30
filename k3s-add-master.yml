@@ -41,7 +41,7 @@
     - name: Fail if no --limit specified
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ERROR: You must specify --limit to target specific nodes        ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -60,7 +60,7 @@
         msg: |
           ⚠️  WARNING: The first master ({{ groups['masters'][0] }}) should be
           initialised using 02-k3s-install.yml, not this playbook.
-          
+
           This playbook is for adding ADDITIONAL masters to an existing cluster.
       when: ansible_limit is defined and groups['masters'][0] in ansible_limit
 
@@ -116,7 +116,7 @@
     - name: Fail if etcd is unhealthy
       fail:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ERROR: etcd cluster is not healthy                              ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -140,7 +140,7 @@
     - name: Display current cluster state
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  Current Cluster State                                           ║
           ╠══════════════════════════════════════════════════════════════════╣
@@ -244,7 +244,7 @@
           ✓ Node {{ matched_node_name | default(inventory_hostname) }} is already a control-plane node
           ✓ Server status: {{ 'running' if (server_status.rc | default(1)) == 0 else 'not running' }}
           ✓ Control-plane role: {{ matched_node_role | default('not set') }}
-          
+
           Skipping installation - master is healthy.
       when: already_joined
 
@@ -341,7 +341,7 @@
     - name: Display success message
       debug:
         msg: |
-          
+
           ╔══════════════════════════════════════════════════════════════════╗
           ║  ✓ Successfully added {{ inventory_hostname }} as control-plane  ║
           ╠══════════════════════════════════════════════════════════════════╣

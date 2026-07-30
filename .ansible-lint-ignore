@@ -1,0 +1,16 @@
+# This file contains ignores rule violations for ansible-lint
+01-infra-prep.yml command-instead-of-module
+01-infra-prep.yml risky-shell-pipe
+02-k3s-install.yml command-instead-of-module
+02-k3s-install.yml risky-shell-pipe
+03-addons.yml jinja[spacing]
+04-monitoring.yml jinja[invalid]
+k3s-add-master.yml command-instead-of-module
+k3s-add-master.yml risky-shell-pipe
+k3s-add-worker.yml command-instead-of-module
+k3s-add-worker.yml risky-shell-pipe
+k3s-remove-master.yml command-instead-of-module
+k3s-remove-master.yml name[casing]
+k3s-remove-master.yml risky-shell-pipe
+k3s-remove-worker.yml command-instead-of-module
+k3s-remove-worker.yml risky-shell-pipe

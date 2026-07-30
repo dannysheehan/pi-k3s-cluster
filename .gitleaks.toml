@@ -1,0 +1,19 @@
+# gitleaks config for pi-cluster. Extends defaults; allowlist vaulted
+# Ansible strings and known non-secret paths.
+
+title = "pi-k3s-cluster"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Repo-specific false positives"
+paths = [
+  '''(.*?)docs/assets/''',
+  '''(.*?)dashboards/.*\.yaml$''',
+]
+
+regexes = [
+  # Ansible vault ciphertext blocks are not live secrets in CI
+  '''\$ANSIBLE_VAULT;''',
+]

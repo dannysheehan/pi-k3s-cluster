@@ -1,14 +1,21 @@
-# Raspberry Pi K3s Cluster Setup
+# Raspberry Pi K3s Cluster
 
-Automated deployment of a production-grade K3s cluster on Raspberry Pi 4 devices using Ansible.
+Ansible playbooks for a production-style **K3s** cluster on Raspberry Pi 4 hardware: Cilium networking, Multus/Longhorn storage network, Traefik ingress, and VictoriaMetrics/VictoriaLogs observability. App delivery (Forgejo, Homepage, …) is handled by **Flux GitOps** in a separate repo — see [docs/GITOPS.md](docs/GITOPS.md).
 
 ![Pi cluster with dedicated storage network cabling](docs/assets/pi-cluster-with-storage-network.png)
+
+| | |
+|--|--|
+| **Infra / Ansible** | This repository (`01`–`04` playbooks) |
+| **Apps / Flux** | Separate GitOps repo on in-cluster Forgejo |
+| **CI** | `.github/workflows/lint.yml` (yamllint, ansible-lint, actionlint, gitleaks) |
+| **Security** | [SECURITY.md](SECURITY.md) |
 
 ## Architecture Overview
 
 This setup creates a resilient Kubernetes cluster with:
 - **1 Control Plane Node** (k3s-ctl-01)
-- **3 Worker Nodes** (k3s-wrk-1, k3s-wrk-2, k3s-wrk-3)
+- **4 Worker Nodes** (k3s-wrk-01 … k3s-wrk-04)
 - **Hybrid Storage Strategy**: OS on SD card, `/var` and high-I/O paths on USB SSD
 - **Dual Network**: Primary network for control plane + dedicated storage network (192.168.10.0/24)
 - **K3s** with custom CNI (no default Flannel or Traefik)

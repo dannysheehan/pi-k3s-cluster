@@ -32,7 +32,7 @@
           CLUSTER STARTUP
           ============================================================
           Starting K3s cluster...
-          
+
           Ensure all nodes are powered on before running this playbook.
           ============================================================
 
@@ -191,16 +191,16 @@
           CLUSTER STARTUP COMPLETE
           ============================================================
           Nodes registered: {{ cluster_nodes.resources | default([]) | length }}
-          
+
           Node Status:
           {% for node in cluster_nodes.resources | default([]) %}
           - {{ node.metadata.name }}: {{ node.status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first | default('Unknown') }}
           {% endfor %}
-          
+
           To verify cluster health:
             kubectl get nodes
             kubectl get pods -A
-          
+
           Access Grafana:
             http://192.168.1.200/grafana/
           ============================================================

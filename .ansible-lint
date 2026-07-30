@@ -1,0 +1,28 @@
+# Ansible-lint for pi-cluster playbooks. Profile: moderate (raise toward
+# safety once the baseline is green). See docs for Multus/Longhorn become
+# patterns that are intentional.
+
+profile: moderate
+offline: true
+
+exclude_paths:
+  - .github/
+  - collections/
+  - .venv/
+  - .claude/
+  - dashboards/
+  - tests/
+
+# Opt-in safety-adjacent rules useful for host-touching playbooks
+enable_list:
+  - risky-shell-pipe
+  - risky-file-permissions
+
+skip_list:
+  # Playbooks intentionally use become broadly for host prep / K3s
+  - partial-become
+  # Inline vault strings and long helm value blocks trip name/yaml noise
+  - yaml[line-length]
+
+warn_list:
+  - experimental

@@ -1,0 +1,30 @@
+# YAML lint for Ansible + Kubernetes manifests in this repo.
+# Ansible truthy values (yes/no) and long vault lines are intentional.
+
+extends: default
+
+ignore: |
+  .venv/
+  collections/
+  .claude/
+  .git/
+
+rules:
+  line-length:
+    # Playbooks embed long Helm values / URLs; keep a soft ceiling only.
+    max: 500
+    allow-non-breakable-words: true
+    allow-non-breakable-inline-mappings: true
+  truthy:
+    allowed-values: ["true", "false", "yes", "no", "on", "off"]
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  document-start: disable
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  indentation:
+    spaces: consistent
+    indent-sequences: consistent

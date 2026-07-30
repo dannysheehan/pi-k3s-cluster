@@ -91,6 +91,10 @@ The `kubernetes.core.helm_repository` module only registers a repo URL — it do
 |---------|-----|
 | Grafana | http://192.168.1.200/grafana |
 | VictoriaLogs UI | http://192.168.1.200/victorialogs/select/vmui/ |
+| Forgejo (Flux GitOps) | http://git.local |
+| Homepage | http://homepage.local |
+
+Add `192.168.1.200 git.local homepage.local` to `/etc/hosts`. Apps are managed by Flux from `~/PROJECTS/home-gitops` — see [docs/GITOPS.md](docs/GITOPS.md).
 
 ## Verification
 ```bash

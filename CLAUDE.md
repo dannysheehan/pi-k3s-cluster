@@ -121,4 +121,14 @@ The playbook explicitly sets `spec.tags: ["storage-network"]` on every worker Lo
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md): Diagnosis commands per component
 - [docs/UPGRADING.md](docs/UPGRADING.md): K3s, Cilium, Longhorn, Multus upgrade procedures
 - [docs/MAINTENANCE.md](docs/MAINTENANCE.md): etcd backup/restore, SD/SSD health checks
+- [docs/GITOPS.md](docs/GITOPS.md): Flux + Forgejo app delivery (`home-gitops`); Ansible owns layers 01–04
 - [dashboards/README.md](dashboards/README.md): Custom Grafana dashboard workflow
+
+## App access (Flux)
+
+| Service | URL |
+|---------|-----|
+| Forgejo | http://git.local |
+| Homepage | http://homepage.local |
+
+Requires `/etc/hosts`: `192.168.1.200 git.local homepage.local`. GitOps repo: `~/PROJECTS/home-gitops`.

@@ -41,6 +41,12 @@ This project deploys a production-ready Kubernetes cluster on Raspberry Pi hardw
   - Safe rerun and upgrade patterns
   - Failure boundaries and operator mental model
 
+- **[GITOPS.md](GITOPS.md)** - Flux + Forgejo application delivery
+  - Ansible vs Flux ownership boundary
+  - Architecture / reconcile diagrams and design rationale
+  - In-cluster Git URL, bootstrap chicken-and-egg, Homepage probe Host header
+  - Points at `~/PROJECTS/home-gitops` for day-2 app changes
+
 - **[DEPLOYMENT-CHECKLIST.md](DEPLOYMENT-CHECKLIST.md)** - Deployment verification
   - Pre-deployment requirements checklist
   - Step-by-step verification procedures
@@ -120,8 +126,9 @@ See [DEPLOYMENT-CHECKLIST.md](DEPLOYMENT-CHECKLIST.md) for detailed verification
 ### For Understanding Architecture
 1. Read [OPERATIONS.md](OPERATIONS.md) - How the live system fits together
 2. Read [CLUSTER-SETUP-SUMMARY.md](CLUSTER-SETUP-SUMMARY.md) - Current architecture
-3. Review [DESIGN.md](DESIGN.md) - Original design goals
-4. Check [DESIGN-REVIEW.md](DESIGN-REVIEW.md) - Design evolution
+3. Read [GITOPS.md](GITOPS.md) - Flux app delivery vs Ansible infra
+4. Review [DESIGN.md](DESIGN.md) - Original design goals
+5. Check [DESIGN-REVIEW.md](DESIGN-REVIEW.md) - Design evolution
 
 ### For Troubleshooting
 1. Check [DEPLOYMENT-CHECKLIST.md](DEPLOYMENT-CHECKLIST.md) - Common issues section

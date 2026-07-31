@@ -10,7 +10,10 @@ k3s-add-master.yml risky-shell-pipe
 k3s-add-worker.yml command-instead-of-module
 k3s-add-worker.yml risky-shell-pipe
 k3s-remove-master.yml command-instead-of-module
+k3s-remove-master.yml jinja[invalid]
 k3s-remove-master.yml name[casing]
 k3s-remove-master.yml risky-shell-pipe
 k3s-remove-worker.yml command-instead-of-module
 k3s-remove-worker.yml risky-shell-pipe
+# syntax-check[unknown-module] for ansible.builtin.mount is resolved via
+# ansible.posix in requirements.yml (installed in CI before lint).

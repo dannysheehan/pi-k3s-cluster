@@ -89,12 +89,18 @@ The `kubernetes.core.helm_repository` module only registers a repo URL — it do
 ## Access URLs
 | Service | URL |
 |---------|-----|
-| Grafana | http://192.168.1.200/grafana |
-| VictoriaLogs UI | http://192.168.1.200/victorialogs/select/vmui/ |
+| Hubble UI | http://hubble.local |
+| Grafana | http://grafana.local |
+| VictoriaMetrics UI | http://victoriametrics.local/vmui/ |
+| VictoriaLogs UI | http://victorialogs.local/select/vmui/ |
 | Forgejo (Flux GitOps) | http://git.local |
 | Homepage | http://homepage.local |
+| Longhorn UI | http://longhorn.local |
 
-Add `192.168.1.200 git.local homepage.local` to `/etc/hosts`. Apps are managed by Flux from `~/PROJECTS/home-gitops` — see [docs/GITOPS.md](docs/GITOPS.md).
+Add to `/etc/hosts`:
+`192.168.1.200 git.local homepage.local longhorn.local hubble.local grafana.local victoriametrics.local victorialogs.local`
+
+Apps/UI IngressRoutes are managed by Flux from `~/PROJECTS/home-gitops` — see [docs/GITOPS.md](docs/GITOPS.md).
 
 ## Verification
 ```bash

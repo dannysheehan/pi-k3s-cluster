@@ -324,7 +324,7 @@ kubectl logs longhorn-test-pod
 | VictoriaMetrics | `kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428` | http://localhost:8428 |
 | VictoriaLogs UI | http://192.168.1.200/victorialogs/select/vmui/ | Native VictoriaLogs web UI |
 | VictoriaLogs API | `kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428` | http://localhost:9428 (direct API access) |
-| Hubble UI | `kubectl port-forward -n kube-system svc/hubble-ui 12000:80` | http://localhost:12000 |
+| Hubble UI | http://hubble.local | Flux IngressRoute → `kube-system/hubble-ui` |
 | Traefik Dashboard | `kubectl port-forward -n traefik svc/traefik 9000:9000` | http://localhost:9000/dashboard/ |
 | Longhorn UI | `kubectl port-forward -n longhorn-system svc/longhorn-frontend 8080:80` | http://localhost:8080 |
 

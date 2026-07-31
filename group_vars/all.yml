@@ -80,7 +80,8 @@ grafana_storage_size: "2Gi"
 # StorageClass parameters are immutable and the chart-managed `longhorn`
 # class keeps `numberOfReplicas: "3"`.
 storage_class: "longhorn-rpi"
-grafana_root_url: "http://192.168.1.200/grafana"
+# Host-based Traefik IngressRoute (Flux apps/observability-ui); not a path prefix.
+grafana_root_url: "http://grafana.local"
 grafana_admin_password: "admin"
 vmagent_scrape_interval: "30s"
 vmagent_scrape_timeout: "10s"

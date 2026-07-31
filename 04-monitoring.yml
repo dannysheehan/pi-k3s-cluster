@@ -26,7 +26,7 @@
 # - kubeconfig available at ~/.kube/config-rpi
 #
 # Access after deployment:
-# - Grafana: http://192.168.1.200/grafana (admin / admin)
+# - Grafana: http://grafana.local (admin / admin) — IngressRoute owned by Flux
 #   Datasources: VictoriaMetrics (default) + VictoriaLogs
 # - Victoria Metrics: kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
 # - VictoriaLogs:     kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428
@@ -1201,17 +1201,18 @@
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 30
+            # Plugin download/load on Pi + Longhorn SQLite can exceed 5 minutes.
+            failureThreshold: 36
           # Third-party plugins to install on Grafana startup.
           # Requires outbound internet access from the monitoring namespace on
           # first install — the pod downloads plugins from grafana.com.
           plugins:
             - victoriametrics-logs-datasource
-          # Configure for sub-path access
+          # Host-based access via grafana.local (Flux IngressRoute)
           grafana.ini:
             server:
               root_url: "{{ grafana_root_url }}"
-              serve_from_sub_path: true
+              serve_from_sub_path: false
             auth.anonymous:
               enabled: false
           # Victoria Metrics as datasource
@@ -1298,82 +1299,20 @@
       tags: [monitoring, grafana]
 
     # ========================================================================
-    # TRAEFIK INGRESSROUTE FOR VICTORIALOGS WEB UI
+    # TRAEFIK INGRESS — owned by Flux (home-gitops apps/observability-ui)
     # ========================================================================
-    # VictoriaLogs serves its web UI at /select/vmui/ on the backend service.
-    # We expose it under /victorialogs using a StripPrefix middleware so that
-    # requests reaching the pod have the correct paths.
-    - name: Create VictoriaLogs StripPrefix middleware
+    # Host routes: grafana.local, victoriametrics.local, victorialogs.local.
+    # Do not recreate path-based IngressRoutes here — Flux manages them.
+    # Clean up the obsolete VictoriaLogs StripPrefix middleware only.
+    - name: Remove legacy VictoriaLogs path StripPrefix middleware
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
-        state: present
-        definition:
-          apiVersion: traefik.io/v1alpha1
-          kind: Middleware
-          metadata:
-            name: vlogs-strip-prefix
-            namespace: monitoring
-          spec:
-            stripPrefix:
-              prefixes:
-                - /victorialogs
+        state: absent
+        api_version: traefik.io/v1alpha1
+        kind: Middleware
+        name: vlogs-strip-prefix
+        namespace: monitoring
       tags: [monitoring, victorialogs]
-
-    - name: Create VictoriaLogs IngressRoute
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        state: present
-        definition:
-          apiVersion: traefik.io/v1alpha1
-          kind: IngressRoute
-          metadata:
-            name: victorialogs
-            namespace: monitoring
-          spec:
-            entryPoints:
-              - web
-            routes:
-              - match: PathPrefix(`/victorialogs`)
-                kind: Rule
-                middlewares:
-                  - name: vlogs-strip-prefix
-                services:
-                  - name: vlogs-victoria-logs-single-server
-                    port: 9428
-      tags: [monitoring, victorialogs]
-
-    # ========================================================================
-    # TRAEFIK INGRESSROUTE FOR GRAFANA ACCESS
-    # ========================================================================
-    # Note: No StripPrefix middleware needed because Grafana is configured with
-    # serve_from_sub_path = true and root_url = http://192.168.1.200/grafana
-    - name: Create Grafana IngressRoute
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        state: present
-        definition:
-          apiVersion: traefik.io/v1alpha1
-          kind: IngressRoute
-          metadata:
-            name: grafana
-            namespace: monitoring
-          spec:
-            entryPoints:
-              - web
-            routes:
-              - match: PathPrefix(`/grafana`)
-                kind: Rule
-                services:
-                  - name: grafana
-                    port: 80
-                    # Grafana's Service exposes port 80 -> targetPort 3000.
-                    # Traefik occasionally fails to build pod backends for this
-                    # translated Service and returns `404 Not Found` with
-                    # `no servers found for monitoring/grafana` in its logs.
-                    # NativeLB makes Traefik forward to the Service ClusterIP
-                    # instead of resolving pod endpoints itself.
-                    nativeLB: true
-      tags: [monitoring, grafana]
 
     - name: Create custom Cilium dashboard ConfigMap
       kubernetes.core.k8s:
@@ -1503,7 +1442,7 @@
           ============================================================
 
           Grafana:
-            URL: http://192.168.1.200/grafana
+            URL: http://grafana.local
             Username: admin
             Password: {{ grafana_admin_password }}
             Datasources: VictoriaMetrics (default) + VictoriaLogs
@@ -1512,8 +1451,11 @@
             kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
             Then access: http://localhost:8428
 
+          VictoriaMetrics Web UI:
+            URL: http://victoriametrics.local/vmui/
+
           VictoriaLogs Web UI:
-            URL: http://192.168.1.200/victorialogs/select/vmui/
+            URL: http://victorialogs.local/select/vmui/
 
           VictoriaLogs (port-forward / direct API):
             kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428

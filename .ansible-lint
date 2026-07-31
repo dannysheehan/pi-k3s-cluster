@@ -3,7 +3,9 @@
 # patterns that are intentional.
 
 profile: moderate
-offline: true
+# CI installs collections via requirements.yml before lint; keep online so
+# ansible-compat can resolve deps if needed.
+offline: false
 
 exclude_paths:
   - .github/

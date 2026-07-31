@@ -45,7 +45,7 @@ flowchart TB
 
 ## Architecture
 
-Cilium L2 announces Traefik at `192.168.1.200`. Host-based routes (`git.local`, `homepage.local`) match the proven pattern in [tests/test-traefik-ingress.yml](../tests/test-traefik-ingress.yml). Path-based Grafana/VictoriaLogs (`/grafana`, `/victorialogs`) remain on the same VIP for Ansible-managed UIs.
+Cilium L2 announces Traefik at `192.168.1.200`. Host-based routes (`*.local`) match the proven pattern in [tests/test-traefik-ingress.yml](../tests/test-traefik-ingress.yml). Observability UIs (Grafana, VictoriaMetrics, VictoriaLogs) and Longhorn use host routes from Flux `apps/observability-ui` and `apps/longhorn-ui`.
 
 ```mermaid
 flowchart LR
@@ -163,15 +163,18 @@ Config files mount with **per-file `subPath`** plus `emptyDir` for `/app/config/
 Add to `/etc/hosts` on clients:
 
 ```
-192.168.1.200 git.local homepage.local
+192.168.1.200 git.local homepage.local longhorn.local hubble.local grafana.local victoriametrics.local victorialogs.local
 ```
 
 | Service | URL | Owner |
 |---------|-----|-------|
 | Forgejo | http://git.local | Flux |
 | Homepage | http://homepage.local | Flux |
-| Grafana | http://192.168.1.200/grafana | Ansible |
-| VictoriaLogs UI | http://192.168.1.200/victorialogs/select/vmui/ | Ansible |
+| Longhorn | http://longhorn.local | Flux |
+| Hubble | http://hubble.local | Flux IngressRoute → Cilium `hubble-ui` |
+| Grafana | http://grafana.local | Flux IngressRoute; Helm release Ansible |
+| VictoriaMetrics | http://victoriametrics.local/vmui/ | Flux IngressRoute; Helm release Ansible |
+| VictoriaLogs | http://victorialogs.local/select/vmui/ | Flux IngressRoute; Helm release Ansible |
 
 Workstation secrets: `~/.config/home-gitops/` (`forgejo-admin.env`, `forgejo-token`) — never commit them. Prefer a credential helper over embedding the token in `git remote` URLs.
 
@@ -195,6 +198,9 @@ home-gitops/
     kustomization.yaml
     forgejo/               # HelmRepository (OCI), HelmRelease, IngressRoute
     homepage/              # Deployment, ConfigMap, RBAC, Service, IngressRoute
+    hubble-ui/             # IngressRoute hubble.local
+    longhorn-ui/           # IngressRoute longhorn.local
+    observability-ui/      # grafana/victoriametrics/victorialogs.local
   README.md
 ```
 

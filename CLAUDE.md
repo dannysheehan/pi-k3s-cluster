@@ -124,11 +124,19 @@ The playbook explicitly sets `spec.tags: ["storage-network"]` on every worker Lo
 - [docs/GITOPS.md](docs/GITOPS.md): Flux + Forgejo app delivery (`home-gitops`); Ansible owns layers 01–04
 - [dashboards/README.md](dashboards/README.md): Custom Grafana dashboard workflow
 
-## App access (Flux)
+## App / UI access (Flux IngressRoutes)
 
 | Service | URL |
 |---------|-----|
 | Forgejo | http://git.local |
 | Homepage | http://homepage.local |
+| Longhorn | http://longhorn.local |
+| Hubble | http://hubble.local |
+| Grafana | http://grafana.local |
+| VictoriaMetrics | http://victoriametrics.local/vmui/ |
+| VictoriaLogs | http://victorialogs.local/select/vmui/ |
 
-Requires `/etc/hosts`: `192.168.1.200 git.local homepage.local`. GitOps repo: `~/PROJECTS/home-gitops`.
+Requires `/etc/hosts`:
+`192.168.1.200 git.local homepage.local longhorn.local hubble.local grafana.local victoriametrics.local victorialogs.local`
+
+GitOps repo: `~/PROJECTS/home-gitops`. See [docs/GITOPS.md](docs/GITOPS.md).

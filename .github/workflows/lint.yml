@@ -41,6 +41,9 @@ jobs:
 
       - name: Run ansible-lint
         uses: ansible/ansible-lint@v25.12.2
+        env:
+          # Avoid workstation vault_password_file from ansible.cfg on public CI
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ansible.ci.cfg
         with:
           setup_python: "true"
           requirements_file: requirements.yml

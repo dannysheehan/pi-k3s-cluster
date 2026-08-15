@@ -19,7 +19,7 @@ fi
 
 if [[ -z "$TARGET_NODE" ]]; then
   echo "Usage: $0 <node-name>" >&2
-  echo "Example: $0 k3s-wrk-03-f118e128" >&2
+  echo "Example: $0 pi-wrk-02" >&2
   exit 1
 fi
 
@@ -34,6 +34,9 @@ run_section "Node Top" kubectl --kubeconfig "$KUBECONFIG_PATH" top nodes | awk -
 
 run_section "Pods On Node" kubectl --kubeconfig "$KUBECONFIG_PATH" get pods -A -o wide | awk -v node="$TARGET_NODE" '$8==node'
 
+# The single-quoted program is intentionally evaluated by the nested bash;
+# positional parameters carry the only caller-provided values.
+# shellcheck disable=SC2016
 run_section "Joined Pod Top View" bash -lc '
   pods_file="$(mktemp)"
   top_file="$(mktemp)"

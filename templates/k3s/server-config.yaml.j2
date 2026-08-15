@@ -1,0 +1,21 @@
+---
+# Managed by Ansible. Critical server settings must remain identical on every
+# embedded-etcd member; joining servers add only server/token in config.yaml.d.
+node-name: {{ inventory_hostname }}
+cluster-cidr: {{ k3s_cluster_cidr }}
+service-cidr: {{ k3s_service_cidr }}
+cluster-domain: {{ k3s_cluster_domain }}
+flannel-backend: none
+disable-network-policy: true
+disable-kube-proxy: true
+secrets-encryption: {{ k3s_secrets_encryption | bool | lower }}
+disable:
+{% for component in k3s_disabled_components %}
+  - {{ component }}
+{% endfor %}
+tls-san:
+  - {{ api_vip }}
+{% for server in groups['masters'] %}
+  - {{ server }}
+  - {{ hostvars[server].ansible_host }}
+{% endfor %}

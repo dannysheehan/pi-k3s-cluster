@@ -1,0 +1,11 @@
+---
+- name: Prepare minimal Ubuntu container filesystem for Netplan rendering
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create Netplan configuration directory
+      ansible.builtin.file:
+        path: /etc/netplan
+        state: directory
+        mode: '0755'

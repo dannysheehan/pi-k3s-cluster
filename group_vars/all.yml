@@ -2,31 +2,71 @@
 # Shared cluster-wide configuration used by playbooks and documentation.
 
 # Core cluster settings
-k3s_version: v1.31.3+k3s1
-master_ip: 192.168.1.41
+k3s_version: v1.36.3+k3s1
+k3s_install_script_url: >-
+  https://raw.githubusercontent.com/k3s-io/k3s/v1.36.3%2Bk3s1/install.sh
+k3s_install_script_checksum: >-
+  sha256:46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad
+api_vip: 192.168.1.40
+# Compatibility alias for playbooks while API endpoint naming is normalized.
+master_ip: "{{ api_vip }}"
+k3s_cluster_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16
+k3s_cluster_domain: cluster.local
+k3s_secrets_encryption: true
+k3s_disabled_components:
+  - servicelb
+  - traefik
+kube_vip_version: "v1.2.3"
+kube_vip_image: >-
+  ghcr.io/kube-vip/kube-vip:v1.2.3@sha256:2fcdbb014a2e217b9ea1b6dacac53d6851b185af323cdd28d100ad82d74bc79a
 
 # Network configuration
 storage_network_range: 192.168.10.0/24
 loadbalancer_ip_range: 192.168.1.200/31
 
 # Add-on versions
-cilium_version: "1.16.4"
-longhorn_version: "1.7.2"
-traefik_version: "30.1.0"
-multus_version: "v4.1.3"
-whereabouts_version: "v0.9.3"
+cilium_version: "1.20.0"
+longhorn_version: "1.12.0"
+traefik_version: "41.2.0"
+gateway_api_version: "v1.6.1"
+multus_version: "v4.3.0"
+multus_manifest_checksum: >-
+  sha256:2d622f697809644a12704497bbf5c3256adc1e7f5b5504655e4993743651b585
+multus_image: >-
+  ghcr.io/k8snetworkplumbingwg/multus-cni:v4.3.0@sha256:ec4e5dfe12b675e4dcbf4e9cd14892f7b4c8ac27aa0dc93cf2e9be0bdd7d764a
+whereabouts_version: "v0.9.4"
+whereabouts_image: >-
+  ghcr.io/k8snetworkplumbingwg/whereabouts:v0.9.4@sha256:f279fd7dc1124d7819330fb2e07357990b2b4c5d8733aef1b028573c29f05e14
 longhorn_default_replica_count: 2
+longhorn_default_data_path: "/var/lib/longhorn"
 longhorn_node_down_pod_deletion_policy: "delete-both-statefulset-and-deployment-pod"
-longhorn_control_plane_allow_scheduling: false
+longhorn_control_plane_allow_scheduling: true
+longhorn_storage_nodes:
+  - pi-ctl-03
+  - pi-wrk-01
+  - pi-wrk-02
 longhorn_node_tags:
   - storage-network
 workload_node_label_key: "pi-cluster.io/workload-node"
 workload_node_label_value: "true"
 
+# Raspberry Pi and USB SSD health collection. Leave the device blank to derive
+# the parent disk backing /. These USB bridges expose health via SCSI mode.
+pi_health_textfile_directory: /var/lib/node_exporter/textfile_collector
+pi_health_smart_device: ""
+pi_health_smart_device_type: scsi
+
+# Secrets management. Set this non-secret identifier to the dedicated
+# 1Password vault before running 05-secrets.yml. The service-account token is
+# supplied through the playbook's private prompt and never stored here.
+external_secrets_version: "2.9.0"
+onepassword_vault_id: ""
+
 # Monitoring stack
-victoria_metrics_version: "0.25.0"
-vmalert_chart_version: "0.43.0"
-kube_state_metrics_chart_version: "7.5.1"
+victoria_metrics_version: "0.44.0"
+vmalert_chart_version: "0.46.0"
+kube_state_metrics_chart_version: "8.3.0"
 # ntfy push notifications for alerts. The topic name acts as a shared secret
 # on ntfy.sh (anyone who knows it can read/post), so it is stored with
 # ansible-vault. Password file: ~/.ansible/vault-pass-pi-cluster (see
@@ -64,11 +104,11 @@ ntfy_topic: !vault |
   62393330383334386163656664393164306532396631613365343034623834323631396238663434
   3332613032366239650a343136393432303564383837613539363439663636626661396237333036
   6361
-grafana_version: "8.5.0"
-node_exporter_chart_version: "4.39.0"
-vmagent_chart_version: "0.14.0"
-victorialogs_chart_version: "0.11.31"
-fluent_bit_chart_version: "0.57.2"
+grafana_version: "12.10.4"
+node_exporter_chart_version: "4.56.1"
+vmagent_chart_version: "0.45.0"
+victorialogs_chart_version: "0.13.9"
+fluent_bit_chart_version: "0.57.9"
 victorialogs_storage_size: "15Gi"
 victorialogs_retention: "7d"
 vm_retention: "7d"
@@ -82,7 +122,15 @@ grafana_storage_size: "2Gi"
 storage_class: "longhorn-rpi"
 # Host-based Traefik IngressRoute (Flux apps/observability-ui); not a path prefix.
 grafana_root_url: "http://grafana.local"
-grafana_admin_password: "admin"
+grafana_admin_user: "admin"
+grafana_admin_password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          31646431626161393461386135316637626332666433666338663164306337353861353434383137
+          3366633039343366313161386533353366396630333037330a363962313564363231376662343965
+          39316261303532626666376364346462613861613733363965363330653332333666613837626530
+          3431643534653763320a376638396132356635396639666233616561323562363934656265663064
+          32346163336232646265343733623834393934336634653562353231316666356435366133373362
+          3962623065346262346662636536653131626266333031316635
 vmagent_scrape_interval: "30s"
 vmagent_scrape_timeout: "10s"
 vmagent_stream_parse: "true"
@@ -92,3 +140,5 @@ monitoring_smoke_test_metric_names:
   - cilium_process_cpu_seconds_total
   - hubble_dns_queries_total
   - traefik_entrypoint_requests_total
+  - pi_cpu_temperature_celsius
+  - pi_root_disk_smart_healthy

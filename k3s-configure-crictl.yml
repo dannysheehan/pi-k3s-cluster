@@ -1,0 +1,11 @@
+---
+# Safe day-2 configuration for existing K3s servers and agents. This does not
+# install, restart, or modify K3s itself.
+
+- name: Configure crictl on existing K3s nodes
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Configure crictl for the K3s runtime
+      ansible.builtin.include_tasks: tasks/configure-crictl.yml

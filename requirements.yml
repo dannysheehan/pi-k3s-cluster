@@ -5,12 +5,8 @@
 collections:
   # Required for Helm and Kubernetes resource management
   - name: kubernetes.core
-    version: ">=3.0.0"
-
-  # Community general collection (useful utilities)
-  - name: community.general
-    version: ">=8.0.0"
+    version: "6.5.0"
 
   # mount, sysctl, etc. used by host prep
   - name: ansible.posix
-    version: ">=1.5.0"
+    version: "2.2.2"

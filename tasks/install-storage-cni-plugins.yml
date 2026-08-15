@@ -1,0 +1,34 @@
+---
+# Multus thick-plugin DelegateAdd looks in /opt/cni/bin. K3s ships the
+# containernetworking bridge binary only under the stable data/cni path.
+# The Longhorn storage-network NAD is type=bridge, so the plugin must be
+# visible in the Multus bin dir or instance-manager sandboxes fail with
+# "failed to find plugin bridge in path [/opt/cni/bin]".
+# Skip nodes that do not have K3s unpacked yet (unjoined inventory hosts).
+- name: Check for K3s-bundled bridge CNI plugin
+  ansible.builtin.stat:
+    path: /var/lib/rancher/k3s/data/cni/bridge
+  register: k3s_cni_bridge
+
+- name: Ensure /opt/cni/bin exists
+  ansible.builtin.file:
+    path: /opt/cni/bin
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: k3s_cni_bridge.stat.exists
+
+- name: Install K3s-bundled bridge CNI plugin into the Multus bin dir
+  # Copy, do not symlink: Multus execs /opt/cni/bin/bridge inside its container,
+  # and a host symlink to /var/lib/rancher/k3s/data/cni/bridge does not resolve
+  # there.
+  ansible.builtin.copy:
+    src: /var/lib/rancher/k3s/data/cni/bridge
+    dest: /opt/cni/bin/bridge
+    remote_src: true
+    follow: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: k3s_cni_bridge.stat.exists

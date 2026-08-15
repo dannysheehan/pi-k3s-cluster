@@ -26,9 +26,9 @@
 # - kubeconfig available at ~/.kube/config-rpi
 #
 # Access after deployment:
-# - Grafana: http://grafana.local (admin / admin) — IngressRoute owned by Flux
+# - Grafana: http://grafana.local
 #   Datasources: VictoriaMetrics (default) + VictoriaLogs
-# - Victoria Metrics: kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
+# - Victoria Metrics: kubectl port-forward -n monitoring svc/vmsingle-stable 8428:8428
 # - VictoriaLogs:     kubectl port-forward -n monitoring svc/vlogs-victoria-logs-single-server 9428:9428
 #
 # ============================================================================
@@ -84,92 +84,47 @@
       tags: [monitoring]
 
     # ========================================================================
-    # UPDATE TRAEFIK TO ENABLE PROMETHEUS METRICS
-    # ========================================================================
-    - name: Update Traefik to enable Prometheus metrics
-      kubernetes.core.helm:
-        name: traefik
-        chart_ref: traefik/traefik
-        chart_version: "30.1.0"
-        release_namespace: traefik
-        kubeconfig: "{{ kubeconfig }}"
-        values:
-          service:
-            type: LoadBalancer
-          providers:
-            kubernetesIngress:
-              enabled: true
-              publishedService:
-                enabled: true
-            kubernetesGateway:
-              enabled: true
-          gatewayClass:
-            enabled: true
-            name: traefik
-          ingressRoute:
-            dashboard:
-              enabled: true
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-          logs:
-            access:
-              enabled: true
-          # Prometheus metrics
-          metrics:
-            prometheus:
-              enabled: true
-              entryPoint: metrics
-              addEntryPointsLabels: true
-              addRoutersLabels: true
-              addServicesLabels: true
-          ports:
-            metrics:
-              port: "{{ traefik_metrics_port }}"
-              expose:
-                default: true
-              exposedPort: "{{ traefik_metrics_port }}"
-              protocol: TCP
-      tags: [monitoring, traefik_metrics]
-
-    # ========================================================================
     # HELM REPOSITORIES
     # ========================================================================
     - name: Add Victoria Metrics Helm Repo
       kubernetes.core.helm_repository:
         name: vm
         repo_url: "https://victoriametrics.github.io/helm-charts/"
-      tags: [monitoring, repositories, vmsingle, victorialogs, vmagent]
+        force_update: true
+      tags: [monitoring, repositories, vmsingle, victorialogs, vmagent, vmalert]
 
     - name: Add Grafana Helm Repo
       kubernetes.core.helm_repository:
         name: grafana
-        repo_url: "https://grafana.github.io/helm-charts"
+        repo_url: "https://grafana-community.github.io/helm-charts"
+        force_update: true
       tags: [monitoring, repositories, grafana]
 
     - name: Add Prometheus Community Helm Repo (for node-exporter)
       kubernetes.core.helm_repository:
         name: prometheus-community
         repo_url: "https://prometheus-community.github.io/helm-charts"
-      tags: [monitoring, repositories, node_exporter]
+        force_update: true
+      tags: [monitoring, repositories, node_exporter, kube-state-metrics]
 
     - name: Add Fluent Helm Repo (for fluent-bit)
       kubernetes.core.helm_repository:
         name: fluent
         repo_url: "https://fluent.github.io/helm-charts"
+        force_update: true
       tags: [monitoring, repositories, fluent-bit]
 
     # helm_repository adds repo config but does NOT fetch the chart index.
     # helm repo update is required so subsequent helm install/upgrade tasks
     # can resolve chart versions without a "no chart version found" error.
+    # Do not pass repo names: tagged reruns (e.g. --tags grafana) only
+    # register a subset, and a named update fails when those names are
+    # missing from the Helm home.
     - name: Update Helm repo indexes
-      ansible.builtin.command: helm repo update vm grafana prometheus-community fluent
+      ansible.builtin.command:
+        cmd: helm repo update
       changed_when: false
-      tags: [monitoring, repositories, vmsingle, victorialogs, vmagent, node_exporter, grafana, fluent-bit]
+      tags: [monitoring, repositories, vmsingle, victorialogs, vmagent, vmalert, node_exporter, kube-state-metrics, grafana, fluent-bit]
 
     # ========================================================================
     # NODE EXPORTER - Host metrics
@@ -183,6 +138,10 @@
         create_namespace: false
         kubeconfig: "{{ kubeconfig }}"
         values:
+          # Cover all five schedulable nodes, including control planes.
+          tolerations:
+            - effect: NoSchedule
+              operator: Exists
           resources:
             requests:
               cpu: 50m
@@ -190,6 +149,15 @@
             limits:
               cpu: 100m
               memory: 64Mi
+          extraArgs:
+            - >-
+              --collector.textfile.directory={{ pi_health_textfile_directory }}
+          extraHostVolumeMounts:
+            - name: pi-health-textfiles
+              hostPath: "{{ pi_health_textfile_directory }}"
+              mountPath: "{{ pi_health_textfile_directory }}"
+              readOnly: true
+              type: Directory
       tags: [monitoring, node_exporter]
 
     # Several charts assume nodes answer health checks in ~1s. That is often
@@ -253,7 +221,7 @@
             retentionPeriod: "{{ vm_retention }}"
             persistentVolume:
               enabled: true
-              storageClass: "{{ storage_class }}"
+              storageClassName: "{{ storage_class }}"
               size: "{{ vm_storage_size }}"
             resources:
               requests:
@@ -295,6 +263,46 @@
                       periodSeconds: 30
                       timeoutSeconds: 10
                       failureThreshold: 10
+      tags: [monitoring, vmsingle]
+
+    # Stable ClusterIP fronting the vmsingle server pods. Decouples vmagent,
+    # vmalert, and Grafana from the chart-managed StatefulSet service DNS path
+    # during pod reschedules (see docs/RECOMMENDATION-VMSINGLE-CLUSTERIP.md).
+    - name: Create stable ClusterIP Service for VM Single
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: vmsingle-stable
+            namespace: monitoring
+          spec:
+            type: ClusterIP
+            selector:
+              app: server
+              app.kubernetes.io/instance: vmsingle
+              app.kubernetes.io/name: victoria-metrics-single
+            ports:
+              - name: http
+                port: 8428
+                targetPort: 8428
+      tags: [monitoring, vmsingle]
+
+    - name: Wait for vmsingle-stable endpoints
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Endpoints
+        namespace: monitoring
+        name: vmsingle-stable
+      register: vmsingle_stable_eps
+      until: >
+        vmsingle_stable_eps.resources | default([]) | length > 0 and
+        (vmsingle_stable_eps.resources[0].subsets | default([]) | length > 0) and
+        (vmsingle_stable_eps.resources[0].subsets[0].addresses | default([]) | length > 0)
+      retries: 30
+      delay: 10
       tags: [monitoring, vmsingle]
 
     # ========================================================================
@@ -385,7 +393,6 @@
         (vlogs_sts.resources[0].status.replicas | default(1))
       retries: 30
       delay: 10
-      ignore_errors: true
       tags: [monitoring, victorialogs]
 
     # ========================================================================
@@ -402,13 +409,36 @@
         timeout: 300s
         values:
           mode: deployment
+          # Queue PVC is RWO. RollingUpdate starts a second pod before the
+          # first releases the volume (Multi-Attach), so the rollout never
+          # completes. Recreate tears down the old pod first.
+          deployment:
+            spec:
+              strategy:
+                type: Recreate
+          # Relaxed vs chart defaults so discovery/remote-write settle on
+          # loaded Pi workers without a post-install patch (which used to
+          # trigger the stuck RollingUpdate above).
+          probe:
+            readiness:
+              httpGet: {}
+              initialDelaySeconds: 10
+              periodSeconds: 15
+              timeoutSeconds: 5
+              failureThreshold: 5
+            liveness:
+              tcpSocket: {}
+              initialDelaySeconds: 15
+              periodSeconds: 20
+              timeoutSeconds: 10
+              failureThreshold: 5
           persistentVolume:
             enabled: true
             storageClassName: "{{ storage_class }}"
             size: "{{ vmagent_queue_size }}"
           # Remote write configuration - required by the chart
           remoteWrite:
-            - url: "http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428/api/v1/write"
+            - url: "http://vmsingle-stable.monitoring.svc:8428/api/v1/write"
           resources:
             requests:
               cpu: 50m
@@ -601,7 +631,7 @@
               - job_name: vmsingle
                 static_configs:
                   - targets:
-                      - vmsingle-victoria-metrics-single-server.monitoring.svc:8428
+                      - vmsingle-stable.monitoring.svc:8428
 
               # vmagent has no Service; discover its pod directly.
               - job_name: vmagent
@@ -616,33 +646,6 @@
                   - source_labels: [__meta_kubernetes_pod_container_port_number]
                     regex: "8429"
                     action: keep
-      tags: [monitoring, vmagent]
-
-    # vmagent is lightweight, but on an already busy worker it can still miss
-    # short probe deadlines while discovery and remote write queues settle.
-    - name: Relax VMAgent probes for loaded nodes
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        state: patched
-        kind: Deployment
-        namespace: monitoring
-        name: vmagent-victoria-metrics-agent
-        definition:
-          spec:
-            template:
-              spec:
-                containers:
-                  - name: vmagent
-                    readinessProbe:
-                      initialDelaySeconds: 10
-                      periodSeconds: 15
-                      timeoutSeconds: 5
-                      failureThreshold: 5
-                    livenessProbe:
-                      initialDelaySeconds: 15
-                      periodSeconds: 20
-                      timeoutSeconds: 10
-                      failureThreshold: 5
       tags: [monitoring, vmagent]
 
     - name: Wait for VMAgent deployment to be ready
@@ -758,7 +761,7 @@
                 cpu: 100m
                 memory: 128Mi
             datasource:
-              url: http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428
+              url: http://vmsingle-stable.monitoring.svc:8428
             notifier:
               url: http://vmalert-victoria-metrics-alert-alertmanager.monitoring.svc:9093
             config:
@@ -782,12 +785,40 @@
                         annotations:
                           summary: !unsafe 'node-exporter on {{ $labels.instance }} unreachable for 5m (node down or exporter broken)'
                       - alert: FilesystemDeviceError
-                        expr: node_filesystem_device_error{mountpoint=~"/|/mnt/ssd|/var"} > 0
+                        expr: node_filesystem_device_error{mountpoint="/"} > 0
                         for: 2m
                         labels:
                           severity: critical
                         annotations:
                           summary: !unsafe 'Filesystem errors on {{ $labels.instance }} {{ $labels.mountpoint }} — SSD may have dropped off the bus (runbook: INCIDENT-2026-06-30)'
+                      - alert: RaspberryPiTemperatureHigh
+                        expr: pi_cpu_temperature_celsius > 75
+                        for: 15m
+                        labels:
+                          severity: warning
+                        annotations:
+                          summary: !unsafe 'Raspberry Pi {{ $labels.instance }} temperature is above 75°C'
+                      - alert: RaspberryPiTemperatureCritical
+                        expr: pi_cpu_temperature_celsius > 80
+                        for: 5m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'Raspberry Pi {{ $labels.instance }} temperature is above 80°C and may throttle'
+                      - alert: RootDiskSMARTFailed
+                        expr: pi_root_disk_smart_healthy == 0
+                        for: 2m
+                        labels:
+                          severity: critical
+                        annotations:
+                          summary: !unsafe 'Root SSD SMART health failed on {{ $labels.instance }} ({{ $labels.device }})'
+                      - alert: PiHealthCollectionFailed
+                        expr: pi_health_metrics_scrape_success == 0
+                        for: 10m
+                        labels:
+                          severity: warning
+                        annotations:
+                          summary: !unsafe 'Temperature or SMART collection is failing on {{ $labels.instance }}'
                   - name: storage
                     interval: 30s
                     rules:
@@ -926,6 +957,7 @@
                     #   priority: urgent for critical, default otherwise
                     - url: "{{ ntfy_server }}/{{ ntfy_topic }}?tpl=yes&title=%7B%7Bif%20eq%20.status%20%22firing%22%7D%7D%F0%9F%94%A5%7B%7Belse%7D%7D%E2%9C%85%7B%7Bend%7D%7D%20%7B%7B.commonLabels.alertname%7D%7D%20%5B%7B%7B.commonLabels.severity%7D%7D%5D&message=%7B%7Brange%20.alerts%7D%7D%7B%7B.annotations.summary%7D%7D%0A%7B%7Bend%7D%7D&priority=%7B%7Bif%20eq%20.commonLabels.severity%20%22critical%22%7D%7Durgent%7B%7Belse%7D%7Ddefault%7B%7Bend%7D%7D"
                       send_resolved: true
+      no_log: true
       tags: [monitoring, vmalert]
 
     - name: Wait for vmalert and Alertmanager to be ready
@@ -975,7 +1007,7 @@
                     containers:
                       - name: ping
                         # Image already cached on all nodes (Grafana init uses it)
-                        image: docker.io/curlimages/curl:7.85.0
+                        image: docker.io/curlimages/curl@sha256:9fab1b73f45e06df9506d947616062d7e8319009257d3a05d970b0de80a41ec5
                         args:
                           - -fsS
                           - --max-time
@@ -990,6 +1022,7 @@
                           limits:
                             cpu: 50m
                             memory: 32Mi
+      no_log: true
       tags: [monitoring, vmalert, heartbeat]
 
     # ========================================================================
@@ -1005,6 +1038,15 @@
         kubeconfig: "{{ kubeconfig }}"
         timeout: 300s
         values:
+          # The chart's optional Helm test pod defaults to busybox:latest.
+          # Deployment verification is handled below, so disable that
+          # non-reproducible hook rather than introducing a floating image.
+          testFramework:
+            enabled: false
+          # Cover all five schedulable nodes, including control planes.
+          tolerations:
+            - effect: NoSchedule
+              operator: Exists
           resources:
             requests:
               cpu: 50m
@@ -1025,9 +1067,8 @@
           securityContext:
             privileged: true
           # Kernel logs must be read from /dev/kmsg directly, NOT from journald:
-          # persistent journal storage lives on /mnt/ssd/var, so journald dies
-          # with the SSD — exactly when kernel logs matter most (2026-06-30
-          # k3s-wrk-01 SSD disconnect left no local record of the USB event).
+          # journald may be unavailable during root-filesystem or storage
+          # failures — exactly when kernel logs matter most.
           extraVolumes:
             - name: kmsg
               hostPath:
@@ -1138,6 +1179,63 @@
     # ========================================================================
     # GRAFANA - Dashboards
     # ========================================================================
+    - name: Create custom Cilium dashboard ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        src: "{{ playbook_dir }}/dashboards/cilium-overview-configmap.yaml"
+      tags: [monitoring, grafana]
+
+    - name: Create VictoriaLogs Kubernetes Logs dashboard ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        src: "{{ playbook_dir }}/dashboards/victorialogs-configmap.yaml"
+      tags: [monitoring, grafana, victorialogs]
+
+    - name: Create Raspberry Pi health dashboard ConfigMap
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        src: "{{ playbook_dir }}/dashboards/pi-health-configmap.yaml"
+      tags: [monitoring, grafana, node_exporter]
+
+    - name: Ensure Grafana PVC exists before Helm install
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: grafana
+            namespace: monitoring
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            storageClassName: "{{ storage_class }}"
+            resources:
+              requests:
+                storage: "{{ grafana_storage_size }}"
+      tags: [monitoring, grafana]
+
+    - name: Ensure Grafana admin Secret exists
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: grafana-admin
+            namespace: monitoring
+          type: Opaque
+          data:
+            admin-user: "{{ grafana_admin_user | default('admin') | b64encode }}"
+            admin-password: "{{ grafana_admin_password | b64encode }}"
+      no_log: true
+      tags: [monitoring, grafana]
+
     - name: Install Grafana
       kubernetes.core.helm:
         name: grafana
@@ -1173,9 +1271,13 @@
           # the volume, which otherwise triggers Multi-Attach errors.
           deploymentStrategy:
             type: Recreate
-          adminPassword: "{{ grafana_admin_password }}"
+          admin:
+            existingSecret: grafana-admin
+            userKey: admin-user
+            passwordKey: admin-password
           persistence:
             enabled: true
+            existingClaim: grafana
             storageClassName: "{{ storage_class }}"
             size: "{{ grafana_storage_size }}"
           resources:
@@ -1183,8 +1285,11 @@
               cpu: 100m
               memory: 128Mi
             limits:
-              cpu: 200m
-              memory: 256Mi
+              # Grafana 13 plugin preinstall (GF_PLUGINS_PREINSTALL_SYNC) does
+              # not listen on :3000 until that finishes. 200m on a Pi throttles
+              # first boot past the startup probe (connection refused, empty logs).
+              cpu: "1"
+              memory: 512Mi
           # Grafana can take a few seconds to answer /api/health on this
           # cluster, especially after plugin load or while SQLite is busy.
           # The chart default readiness timeout (1s) is too aggressive and
@@ -1201,13 +1306,13 @@
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
-            # Plugin download/load on Pi + Longhorn SQLite can exceed 5 minutes.
-            failureThreshold: 36
-          # Third-party plugins to install on Grafana startup.
-          # Requires outbound internet access from the monitoring namespace on
-          # first install — the pod downloads plugins from grafana.com.
+            # Plugin download/load on Pi + Longhorn SQLite can exceed 10 minutes
+            # on a cold start (image pull + preinstall + first SQLite migrate).
+            failureThreshold: 90
+          # Pin plugin version for reproducible rebuilds. Startup still downloads
+          # the plugin from grafana.com unless a custom image is adopted.
           plugins:
-            - victoriametrics-logs-datasource
+            - victoriametrics-logs-datasource@0.29.0
           # Host-based access via grafana.local (Flux IngressRoute)
           grafana.ini:
             server:
@@ -1222,7 +1327,8 @@
               datasources:
                 - name: VictoriaMetrics
                   type: prometheus
-                  url: http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428
+                  uid: VictoriaMetrics
+                  url: http://vmsingle-stable.monitoring.svc:8428
                   access: proxy
                   isDefault: true
                 - name: VictoriaLogs
@@ -1261,6 +1367,22 @@
                   editable: true
                   options:
                     path: /var/lib/grafana/dashboards/logs
+                - name: cilium
+                  orgId: 1
+                  folder: 'Infrastructure'
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/cilium
+                - name: hardware
+                  orgId: 1
+                  folder: 'Infrastructure'
+                  type: file
+                  disableDeletion: false
+                  editable: true
+                  options:
+                    path: /var/lib/grafana/dashboards/hardware
           # Pre-provision community dashboards
           dashboards:
             default:
@@ -1290,19 +1412,126 @@
                 gnetId: 16612
                 revision: 1
                 datasource: VictoriaMetrics
-          sidecar:
-            dashboards:
-              enabled: true
-              searchNamespace: ALL
-            datasources:
-              enabled: true
+          # Use one provisioning model. Mount the two repository-owned
+          # ConfigMaps into the inline file providers instead of enabling the
+          # chart sidecars alongside datasources/dashboardProviders.
+          extraConfigmapMounts:
+            - name: cilium-dashboard
+              mountPath: /var/lib/grafana/dashboards/cilium
+              configMap: grafana-dashboard-cilium-overview
+              readOnly: true
+            - name: victorialogs-dashboard
+              mountPath: /var/lib/grafana/dashboards/logs
+              configMap: victorialogs-dashboard
+              readOnly: true
+            - name: pi-health-dashboard
+              mountPath: /var/lib/grafana/dashboards/hardware
+              configMap: grafana-dashboard-pi-health
+              readOnly: true
       tags: [monitoring, grafana]
 
     # ========================================================================
-    # TRAEFIK INGRESS — owned by Flux (home-gitops apps/observability-ui)
+    # TRAEFIK INGRESS — host routes for local UIs
     # ========================================================================
-    # Host routes: grafana.local, victoriametrics.local, victorialogs.local.
-    # Do not recreate path-based IngressRoutes here — Flux manages them.
+    # Same objects as home-gitops apps/observability-ui. Create them here so
+    # grafana.local works after 04-monitoring.yml, before Flux is bootstrapped.
+    # Flux reconcile is a no-op while the specs match. Grafana Service is
+    # 80 -> 3000; nativeLB avoids Traefik "no servers" on that ClusterIP.
+    - name: Expose Grafana on grafana.local
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: grafana
+            namespace: monitoring
+            labels:
+              app.kubernetes.io/name: grafana
+            annotations:
+              gethomepage.dev/enabled: "true"
+              gethomepage.dev/name: Grafana
+              gethomepage.dev/description: Metrics and logs dashboards
+              gethomepage.dev/group: Observability
+              gethomepage.dev/icon: grafana.png
+              gethomepage.dev/href: http://grafana.local
+          spec:
+            entryPoints:
+              - web
+            routes:
+              - match: Host(`grafana.local`)
+                kind: Rule
+                services:
+                  - name: grafana
+                    port: 80
+                    nativeLB: true
+      tags: [monitoring, grafana, ingress]
+
+    - name: Expose VictoriaMetrics UI on victoriametrics.local
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: victoriametrics
+            namespace: monitoring
+            labels:
+              app.kubernetes.io/name: victoriametrics-ui
+            annotations:
+              gethomepage.dev/enabled: "true"
+              gethomepage.dev/name: VictoriaMetrics
+              gethomepage.dev/description: Metrics TSDB / vmui
+              gethomepage.dev/group: Observability
+              gethomepage.dev/icon: victoriametrics.png
+              gethomepage.dev/href: http://victoriametrics.local/vmui/
+              gethomepage.dev/app: victoria-metrics-single
+              gethomepage.dev/pod-selector: app.kubernetes.io/name=victoria-metrics-single
+          spec:
+            entryPoints:
+              - web
+            routes:
+              - match: Host(`victoriametrics.local`)
+                kind: Rule
+                services:
+                  - name: vmsingle-victoria-metrics-single-server
+                    port: 8428
+      tags: [monitoring, vmsingle, ingress]
+
+    - name: Expose VictoriaLogs UI on victorialogs.local
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: victorialogs
+            namespace: monitoring
+            labels:
+              app.kubernetes.io/name: victorialogs-ui
+            annotations:
+              gethomepage.dev/enabled: "true"
+              gethomepage.dev/name: VictoriaLogs
+              gethomepage.dev/description: LogsQL UI
+              gethomepage.dev/group: Observability
+              gethomepage.dev/icon: victorialogs.png
+              gethomepage.dev/href: http://victorialogs.local/select/vmui/
+              gethomepage.dev/app: victoria-logs-single
+              gethomepage.dev/pod-selector: app.kubernetes.io/name=victoria-logs-single
+          spec:
+            entryPoints:
+              - web
+            routes:
+              - match: Host(`victorialogs.local`)
+                kind: Rule
+                services:
+                  - name: vlogs-victoria-logs-single-server
+                    port: 9428
+      tags: [monitoring, victorialogs, ingress]
+
     # Clean up the obsolete VictoriaLogs StripPrefix middleware only.
     - name: Remove legacy VictoriaLogs path StripPrefix middleware
       kubernetes.core.k8s:
@@ -1313,23 +1542,6 @@
         name: vlogs-strip-prefix
         namespace: monitoring
       tags: [monitoring, victorialogs]
-
-    - name: Create custom Cilium dashboard ConfigMap
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        state: present
-        # Use a standalone manifest file here rather than embedding a large JSON
-        # object in this playbook. It avoids YAML/templating edge cases and makes
-        # future dashboard edits easier to review.
-        src: "{{ playbook_dir }}/dashboards/cilium-overview-configmap.yaml"
-      tags: [monitoring, grafana]
-
-    - name: Create VictoriaLogs Kubernetes Logs dashboard ConfigMap
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        state: present
-        src: "{{ playbook_dir }}/dashboards/victorialogs-configmap.yaml"
-      tags: [monitoring, grafana, victorialogs]
 
     # ========================================================================
     # VERIFICATION
@@ -1349,7 +1561,6 @@
         (vm_sts.resources[0].status.replicas | default(1))
       retries: 30
       delay: 10
-      ignore_errors: true
       tags: [monitoring, verification]
 
     - name: Query Victoria Metrics for expected scrape series
@@ -1358,7 +1569,7 @@
         namespace: monitoring
         pod: "{{ vmagent_pod_name }}"
         command: >-
-          sh -c "wget -qO- http://vmsingle-victoria-metrics-single-server.monitoring.svc:8428/api/v1/series?match[]={{ item }}"
+          sh -c "wget -qO- http://vmsingle-stable.monitoring.svc:8428/api/v1/series?match[]={{ item }}"
       vars:
         vmagent_pod_name: "{{ vmagent_pods_ready.resources[0].metadata.name }}"
       register: monitoring_smoke_tests
@@ -1430,11 +1641,8 @@
         grafana_deploy.resources | length > 0 and
         (grafana_deploy.resources[0].status.readyReplicas | default(0)) ==
         (grafana_deploy.resources[0].status.replicas | default(1))
-      retries: 30
+      retries: 90
       delay: 10
-      ignore_errors: true
-
-    - name: Display monitoring stack status
       ansible.builtin.debug:
         msg: |
           ============================================================
@@ -1443,12 +1651,11 @@
 
           Grafana:
             URL: http://grafana.local
-            Username: admin
-            Password: {{ grafana_admin_password }}
+            Credentials: grafana-admin Secret in monitoring namespace
             Datasources: VictoriaMetrics (default) + VictoriaLogs
 
           Victoria Metrics (port-forward):
-            kubectl port-forward -n monitoring svc/vmsingle-victoria-metrics-single-server 8428:8428
+            kubectl port-forward -n monitoring svc/vmsingle-stable 8428:8428
             Then access: http://localhost:8428
 
           VictoriaMetrics Web UI:

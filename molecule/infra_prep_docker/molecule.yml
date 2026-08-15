@@ -1,0 +1,42 @@
+---
+dependency:
+  name: shell
+  command: >-
+    ansible-galaxy collection install -r
+    ${MOLECULE_SCENARIO_DIRECTORY}/collections.yml
+driver:
+  name: docker
+platforms:
+  - name: infra-prep-ubuntu2604
+    image: >-
+      geerlingguy/docker-ubuntu2604-ansible@sha256:515a7bc4176b6dd972de5862a21015c6822b2da96f24ec760e3ecc0a12478359
+    pre_build_image: true
+    privileged: true
+    command: /lib/systemd/systemd
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+  options:
+    extra-vars: >-
+      infra_container_test_mode=true
+      storage_ip=192.168.10.250
+      storage_mac=02:00:00:00:00:fa
+  inventory:
+    host_vars: {}
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

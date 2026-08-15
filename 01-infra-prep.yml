@@ -1,265 +1,516 @@
 ---
 # ==============================================================================
-# 01-infra-prep.yml - Raspberry Pi Infrastructure Preparation
+# 01-infra-prep.yml - Ubuntu Server ARM64 SSD-Root Host Preparation
 # ==============================================================================
 #
 # Purpose:
-#   Prepares Raspberry Pi nodes with the infrastructure requirements for K3s:
-#   - Time synchronization (critical for distributed systems)
-#   - USB SSD setup for fast storage (replaces slow SD cards)
-#   - Storage network configuration (dedicated 10Gbps network for Longhorn)
-#   - cgroups enablement (required for Kubernetes on Raspberry Pi OS)
+#   Prepares freshly flashed Ubuntu Server ARM64 nodes whose root filesystem
+#   lives on the USB SSD for K3s installation:
+#   - Non-destructive root storage contract verification (USB SSD, not SD card)
+#   - Time synchronization (chrony)
+#   - Runtime cgroup controller verification required by K3s
+#   - K3s / Cilium prerequisites: kernel modules, bridge-nf sysctls, swap off,
+#     hostname loopback resolution
+#   - iSCSI/NFS packages and kernel modules for Longhorn
+#   - Storage network: br-storage bridge on the dedicated USB Ethernet NIC
+#   - Headless-node hygiene: mask snapd/ModemManager/bluetooth/avahi, bound
+#     journald, disable unattended-upgrades automatic reboot
 #
-# Key Components:
-#   1. Time Sync: Ensures all nodes have synchronized clocks
-#   2. USB SSD: Formats and mounts external USB SSDs at /mnt/ssd
-#      - Used for the full /var tree (/mnt/ssd/var)
-#      - Used for K3s data (/mnt/ssd/k3s)
-#      - Used for Longhorn storage (/mnt/ssd/longhorn)
-#      - Much faster than SD cards for etcd and container I/O
-#   3. Storage Network: Creates br-storage bridge for Longhorn replication
-#      - Uses USB Ethernet adapters (10Gbps)
-#      - Network: 192.168.10.0/24
-#      - Isolates storage traffic from application traffic
-#   4. cgroups: Required for Kubernetes resource management on Raspberry Pi
+# Design assumptions:
+#   - OS is installed directly to the USB SSD during imaging; this playbook does
+#     not format, partition, mount, or relocate /var.
+#   - storage_ip and storage_mac are set per host in hosts.ini.
+#   - Longhorn replication uses br-storage on 192.168.10.0/24 (bridge CNI).
 #
-# Prerequisites:
-#   - Raspberry Pi OS Lite (64-bit) installed on all nodes
-#   - SSH access configured (key-based authentication)
-#   - USB SSDs connected to all nodes
-#   - USB Ethernet adapters connected for storage network
-#   - Inventory file (hosts.ini) configured with node IPs
+# Override:
+#   -e infra_allow_non_usb_root=true skips USB/mmcblk root checks (validation only).
 #
 # Post-execution:
-#   - Nodes will reboot if cgroups were not already enabled
-#   - After reboot, nodes are ready for K3s installation (02-k3s-install.yml)
-#   - Verify with: ssh ubuntu@<node-ip> "df -h /mnt/ssd && ip addr show br-storage"
+#   - Nodes are ready for 02-k3s-install.yml
+#   - Verify: ssh <node> "findmnt / && ip addr show br-storage"
 #
 # ==============================================================================
 
-- name: Prepare Raspberry Pi Nodes
+- name: Prepare Ubuntu SSD-Root Nodes
   hosts: all
-  become: yes
+  become: true
   vars:
-    # SSD device - can be overridden per host in inventory
-    # Default assumes first USB storage device
-    ssd_device: "{{ ssd_device_override | default('') }}"
+    infra_allow_non_usb_root: false
+    # Molecule's systemd container is useful for package and configuration
+    # coverage, but cannot emulate Pi hardware or safely alter its host-backed
+    # kernel/network state.  This is intentionally false in every deployment.
+    infra_container_test_mode: false
   tasks:
-    # --- OS PREP (time sync first, then K3s prereqs) ---
-    - name: Ensure time synchronization is enabled
-      systemd:
-        name: systemd-timesyncd
+    - name: Restrict the hardware bypass to Docker test targets
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (infra_container_test_mode | bool) or
+            ansible_connection in ['docker', 'community.docker.docker']
+        fail_msg: >-
+          infra_container_test_mode may only be used through an Ansible Docker
+          connection for disposable Molecule targets; it is forbidden on SSH hosts.
+
+    # --- INVENTORY CONTRACT ---
+    - name: Assert storage_ip is defined
+      ansible.builtin.assert:
+        that:
+          - storage_ip is defined
+          - storage_ip | length > 0
+        fail_msg: >-
+          storage_ip must be set for {{ inventory_hostname }} in hosts.ini.
+
+    - name: Assert storage_mac is defined and valid
+      ansible.builtin.assert:
+        that:
+          - storage_mac is defined
+          - storage_mac is match('^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
+        fail_msg: >-
+          storage_mac must be a valid MAC address for {{ inventory_hostname }} in hosts.ini.
+
+    # --- ROOT FILESYSTEM CONTRACT (non-destructive) ---
+    - name: Get root mount source
+      ansible.builtin.command: findmnt -n -o SOURCE --uniq /
+      register: root_mount_source
+      changed_when: false
+      check_mode: false
+      when: not infra_container_test_mode | bool
+
+    - name: Resolve root block device
+      ansible.builtin.command: readlink -f {{ root_mount_source.stdout | trim }}
+      register: root_block_device
+      changed_when: false
+      check_mode: false
+      when: not infra_container_test_mode | bool
+
+    - name: Resolve root parent disk
+      ansible.builtin.command: lsblk -no PKNAME {{ root_block_device.stdout | trim }}
+      register: root_parent_disk_cmd
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: not infra_container_test_mode | bool
+
+    - name: Set root disk name
+      ansible.builtin.set_fact:
+        root_disk_name: >-
+          {{ (root_parent_disk_cmd.stdout | trim)
+             if (root_parent_disk_cmd.stdout | trim | length > 0)
+             else (root_block_device.stdout | trim | regex_replace('^.*/', '')) }}
+      when: not infra_container_test_mode | bool
+
+    - name: Get root disk transport
+      ansible.builtin.command: lsblk -no TRAN /dev/{{ root_disk_name }}
+      register: root_disk_transport_cmd
+      changed_when: false
+      check_mode: false
+      when: not infra_container_test_mode | bool
+
+    - name: Assert root filesystem is USB SSD (not SD card)
+      ansible.builtin.assert:
+        that:
+          - infra_allow_non_usb_root | bool or (
+              root_disk_transport_cmd.stdout | trim | lower == 'usb' and
+              'mmcblk' not in (root_disk_name | lower)
+            )
+        fail_msg: >-
+          Root filesystem must be on a USB SSD, not an SD card (mmcblk).
+          Disk={{ root_disk_name }}, transport={{ root_disk_transport_cmd.stdout | trim }}.
+          For disposable offline validation only: -e infra_allow_non_usb_root=true
+      when: not infra_container_test_mode | bool
+
+    # --- OS PREP ---
+    # Ubuntu 26.04 server images ship chrony (not systemd-timesyncd) as the
+    # default NTP client. Ensure chrony is enabled so time sync is guaranteed
+    # before K3s needs accurate clocks for TLS/etcd.
+    - name: Ensure chrony is enabled and running
+      ansible.builtin.systemd:
+        name: chrony
         state: started
-        enabled: yes
+        enabled: true
+      when: not infra_container_test_mode | bool
 
     - name: Force time synchronization
-      command: timedatectl set-ntp true
+      ansible.builtin.command: timedatectl set-ntp true
       changed_when: false
+      when: not infra_container_test_mode | bool
 
-    - name: Wait for time to sync
-      pause:
-        seconds: 3
+    - name: Wait for time synchronization
+      ansible.builtin.command: timedatectl show -p NTPSynchronized --value
+      register: ntp_sync
+      until: ntp_sync.stdout | trim == 'yes'
+      retries: 10
+      delay: 3
+      changed_when: false
+      when: not infra_container_test_mode | bool
 
-    - name: Enable cgroups in cmdline.txt (Required for K3s on RPi)
-      replace:
-        path: /boot/firmware/cmdline.txt
-        regexp: '^(.*console=tty1.*)$'
-        replace: '\1 cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1'
-      notify: Reboot
-      # K3s/containerd expect cgroup controllers to be available. On Pi images
-      # this is sometimes missing by default, so we fix it before Kubernetes is installed.
+    - name: Check for cgroup v2 unified hierarchy
+      ansible.builtin.stat:
+        path: /sys/fs/cgroup/cgroup.controllers
+      register: cgroup_v2
+      when: not infra_container_test_mode | bool
+
+    - name: Read cgroup v2 controllers
+      ansible.builtin.slurp:
+        src: /sys/fs/cgroup/cgroup.controllers
+      register: cgroup_v2_controllers
+      when:
+        - not infra_container_test_mode | bool
+        - cgroup_v2.stat.exists
+
+    - name: Assert K3s cgroup controllers on cgroup v2
+      ansible.builtin.assert:
+        that:
+          - cgroup_v2.stat.exists
+          - "'memory' in (cgroup_v2_controllers.content | b64decode)"
+          - "'cpuset' in (cgroup_v2_controllers.content | b64decode)"
+        fail_msg: >-
+          K3s requires memory and cpuset cgroup controllers on Ubuntu Server ARM64.
+          Reflash with an image that enables unified cgroups, or add
+          cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1 to the kernel cmdline.
+      when:
+        - not infra_container_test_mode | bool
+        - cgroup_v2.stat.exists
+
+    - name: Check cgroup v1 memory controller
+      ansible.builtin.stat:
+        path: /sys/fs/cgroup/memory
+      register: cgroup_v1_memory
+      when:
+        - not infra_container_test_mode | bool
+        - not cgroup_v2.stat.exists
+
+    - name: Check cgroup v1 cpuset controller
+      ansible.builtin.stat:
+        path: /sys/fs/cgroup/cpuset
+      register: cgroup_v1_cpuset
+      when:
+        - not infra_container_test_mode | bool
+        - not cgroup_v2.stat.exists
+
+    - name: Assert K3s cgroup controllers on cgroup v1
+      ansible.builtin.assert:
+        that:
+          - cgroup_v1_memory.stat.exists
+          - cgroup_v1_cpuset.stat.exists
+        fail_msg: >-
+          K3s requires memory and cpuset cgroup controllers. This Ubuntu image does not
+          expose them; use Ubuntu Server ARM64 with cgroups enabled.
+      when:
+        - not infra_container_test_mode | bool
+        - not cgroup_v2.stat.exists
+
+    # --- K3S / CILIUM HARD REQUIREMENTS ---
+    - name: Ensure hostname resolves via 127.0.1.1 in /etc/hosts
+      # cloud-init on Ubuntu server images occasionally leaves /etc/hosts
+      # without the 127.0.1.1 entry for the node hostname. K3s joins can fail
+      # with "resolves to more than one address" without it. Add the line if
+      # missing so node-name resolution is unambiguous.
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "127.0.1.1\t{{ ansible_facts.hostname }}"
+        regexp: "^127\\.0\\.1\\.1\\s+"
+        state: present
+        insertbefore: BOF
+      when: not infra_container_test_mode | bool
+
+    - name: Persist required kernel modules for K3s and containerd
+      # br_netfilter is required for the bridge-nf-call-* sysctls below, which
+      # in turn are required for Cilium (in kube-proxy-replacement mode) to see
+      # bridged pod traffic — without it, kube-proxy replacement silently
+      # drops bridged traffic on br-storage. overlay is required by containerd
+      # for pod root filesystems; built-in on most Pi kernels but persisting is
+      # cheap insurance against future kernel upgrades.
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k3s.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          br_netfilter
+          overlay
+      when: not infra_container_test_mode | bool
+
+    - name: Load required kernel modules now
+      ansible.builtin.command: modprobe {{ item }}
+      loop:
+        - br_netfilter
+        - overlay
+      changed_when: false
+      when: not infra_container_test_mode | bool
+
+    - name: Configure sysctls for K3s and Cilium networking
+      # net.bridge.bridge-nf-call-iptables/ip6tables = 1 routes bridged
+      # traffic through iptables so Cilium's kube-proxy replacement can
+      # rewrite service IPs and host ports. net.ipv4.ip_forward = 1 is
+      # required for any pod-to-pod traffic and any service-IP forwarding.
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "1"
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-k3s-network.conf
+      loop:
+        - net.bridge.bridge-nf-call-iptables
+        - net.bridge.bridge-nf-call-ip6tables
+        - net.ipv4.ip_forward
+      when: not infra_container_test_mode | bool
+
+    - name: Check current swap state
+      ansible.builtin.command: swapon --noheadings --show=NAME
+      register: swap_state
+      changed_when: false
+      when: not infra_container_test_mode | bool
+
+    - name: Disable all swap
+      # K3s refuses to start with swap enabled — kubelet's NodeAllocatable
+      # cannot reason about swap, and K3s hard-fails the install. Ubuntu
+      # 26.04 server images don't ship swap, but a swapfile or zram can
+      # appear via cloud-init or unattended snap refreshes; disable defensively.
+      ansible.builtin.command: swapoff -a
+      when:
+        - not infra_container_test_mode | bool
+        - swap_state.stdout | trim | length > 0
+      changed_when: swap_state.stdout | trim | length > 0
+
+    - name: Comment out swap entries in /etc/fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^(\S+\s+\S+\s+swap\s.*)$'
+        replace: '# \1  # disabled by 01-infra-prep.yml — K3s requires swap off'
+      when: not infra_container_test_mode | bool
+
+    - name: Assert swap is now disabled
+      ansible.builtin.command: swapon --noheadings --show=NAME
+      register: swap_state_after
+      changed_when: false
+      when:
+        - not infra_container_test_mode | bool
+        - swap_state.stdout | trim | length > 0
+
+    - name: Fail if swap is still active after disable
+      ansible.builtin.assert:
+        that:
+          - swap_state_after.stdout | trim | length == 0
+        fail_msg: >-
+          K3s refuses to start with swap enabled. After running swapoff -a and
+          commenting /etc/fstab, swap is still active (likely a swapfile under
+          /swapfile or zram via systemd-swap). Investigate before continuing.
+      when:
+        - not infra_container_test_mode | bool
+        - swap_state.stdout | trim | length > 0
 
     - name: Install essential packages
-      apt:
+      ansible.builtin.apt:
         name:
           - open-iscsi
           - nfs-common
+          - smartmontools
+          - lm-sensors
         state: present
-        update_cache: yes
+        update_cache: true
 
-    # linux-modules-extra-raspi is only available on Ubuntu for Raspberry Pi
-    # It provides iscsi_tcp module needed by Longhorn/iSCSI
-    - name: Check if linux-modules-extra-raspi is available
-      command: apt-cache show linux-modules-extra-raspi
-      register: raspi_modules_check
-      failed_when: false
-      changed_when: false
-
-    - name: Install linux-modules-extra-raspi (Ubuntu Raspberry Pi only)
-      apt:
-        name: linux-modules-extra-raspi
-        state: present
-      when: raspi_modules_check.rc == 0
-
-    # For systems without linux-modules-extra-raspi, ensure iscsi_tcp module is available
-    - name: Check if iscsi_tcp module is available
-      command: modprobe -n iscsi_tcp
-      register: iscsi_module_check
-      failed_when: false
-      changed_when: false
-      when: raspi_modules_check.rc != 0
-
-    - name: Warn if iscsi_tcp module is not available
-      debug:
-        msg: "WARNING: iscsi_tcp module not found. Longhorn iSCSI may not work. Consider installing appropriate kernel modules for your distribution."
-      when: raspi_modules_check.rc != 0 and iscsi_module_check.rc != 0
-
-    # --- HYBRID STORAGE SETUP ---
-    # Critical Fix #2: Detect USB SSD dynamically instead of hardcoding /dev/sda1
-    - name: Find USB storage device (skip optical/virtual) if not specified
-      shell: |
-        # Prefer real USB disks (TYPE=disk, TRAN=usb); skip rom/loop
-        usb_disk=$(lsblk -rno NAME,TYPE,TRAN | awk '$3=="usb" && $2=="disk" {print $1; exit}')
-
-        if [ -n "$usb_disk" ]; then
-          # Use first partition if present, otherwise the whole disk
-          usb_part=$(lsblk -rno NAME,TYPE /dev/$usb_disk | awk '$2=="part" {print $1; exit}')
-          if [ -n "$usb_part" ]; then
-            echo "/dev/$usb_part"
-          else
-            echo "/dev/$usb_disk"
-          fi
-          exit 0
-        fi
-
-        # Fallback to the first non-rom, non-loop disk (e.g., /dev/sda1)
-        fallback_disk=$(lsblk -rno NAME,TYPE,TRAN | awk '$2=="disk" && $1!~/^sr/ && $1!~/^loop/ {print $1; exit}')
-        if [ -n "$fallback_disk" ]; then
-          fallback_part=$(lsblk -rno NAME,TYPE /dev/$fallback_disk | awk '$2=="part" {print $1; exit}')
-          if [ -n "$fallback_part" ]; then
-            echo "/dev/$fallback_part"
-          else
-            echo "/dev/$fallback_disk"
-          fi
-        else
-          # Last resort
-          echo "/dev/sda1"
-        fi
-      register: detected_ssd
-      changed_when: false
-      when: ssd_device == ''
-
-    - name: Set SSD device path
-      set_fact:
-        ssd_path: "{{ ssd_device if ssd_device != '' else detected_ssd.stdout | trim }}"
-
-    - name: Display detected SSD device
-      debug:
-        msg: "Using SSD device: {{ ssd_path }}"
-
-    # Critical Fix #3: Check if filesystem already exists before formatting
-    - name: Check if SSD already has a filesystem
-      command: blkid {{ ssd_path }}
-      register: blkid_result
-      failed_when: false
-      changed_when: false
-
-    - name: Format USB SSD (only if no filesystem exists)
-      filesystem:
-        fstype: ext4
-        dev: "{{ ssd_path }}"
-      when: blkid_result.rc != 0
-
-    - name: Read SSD UUID
-      command: blkid -s UUID -o value {{ ssd_path }}
-      register: ssd_uuid
-      changed_when: false
-
-    - name: Mount SSD to /mnt/ssd
-      mount:
-        path: /mnt/ssd
-        src: "UUID={{ ssd_uuid.stdout | trim }}"
-        fstype: ext4
-        opts: defaults,noatime,nofail,x-systemd.device-timeout=10s
-        state: mounted
-      # /dev/sdX ordering is not stable on Pi USB storage. Persist the mount by UUID
-      # so the node still boots correctly if the same SSD enumerates as sdb later.
-      # nofail + short device timeout keep the node bootable (and reachable over
-      # SSH) if the USB SSD is absent at boot, instead of hanging into emergency
-      # mode (2026-06-30: k3s-wrk-01's SSD dropped off the USB bus mid-flight).
-      # /mnt/ssd becomes the root for high-write paths used later by K3s and Longhorn.
-
-    - name: Create offload directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      loop:
-        - /mnt/ssd/var
-        - /mnt/ssd/k3s
-        - /mnt/ssd/longhorn
-
-    - name: Stop rsyslog before syncing /var
-      service:
-        name: rsyslog
+    # --- PI NODE HYGIENE ---
+    - name: Mask services not needed on a headless K3s Pi node
+      # snapd causes periodic SSD churn from snap refreshes; ModemManager and
+      # bluetooth have no hardware to manage on a Pi cluster; avahi-daemon's
+      # mDNS can collide with cluster DNS resolution. None of these belong on
+      # a headless K3s node.
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        masked: true
+        enabled: false
         state: stopped
-
-    - name: Sync /var to SSD (first run only)
-      command: rsync -aHAXx --numeric-ids /var/ /mnt/ssd/var/
-      args:
-        creates: /mnt/ssd/var/log
-      # We stage /var on the SSD first, then switch over on reboot using a bind
-      # mount entry in fstab. Reboot-based activation is safer than trying to
-      # live-bind the entire /var tree while services are actively writing to it.
-
-    - name: Remove legacy /var/log bind mount from fstab
-      mount:
-        path: /var/log
-        src: /mnt/ssd/var_log
-        fstype: none
-        opts: bind
-        state: absent_from_fstab
-      notify: Reboot
-
-    - name: Configure /var bind mount from SSD
-      mount:
-        path: /var
-        src: /mnt/ssd/var
-        opts: bind,nofail,x-systemd.requires-mounts-for=/mnt/ssd
-        state: present
-        fstype: none
-      notify: Reboot
-      # requires-mounts-for ensures the bind never grabs the empty /mnt/ssd
-      # stub directory on the SD card if the SSD mount was skipped (nofail).
-
-    # With nofail, a node whose SSD is dead still boots — but K3s must NOT
-    # start in that state or it writes fresh state to the SD card through the
-    # empty /mnt/ssd stub and reports Ready with no real storage (seen on
-    # k3s-wrk-04, 2026-07-05). Drop-ins are valid even before the K3s unit
-    # exists (02-k3s-install.yml runs later), so create both variants.
-    - name: Create K3s systemd drop-in directories
-      file:
-        path: "/etc/systemd/system/{{ item }}.service.d"
-        state: directory
-        mode: '0755'
       loop:
-        - k3s
-        - k3s-agent
+        - snapd.service
+        - snapd.socket
+        - ModemManager.service
+        - bluetooth.service
+        - avahi-daemon.service
+        - avahi-daemon.socket
+      failed_when: false
 
-    - name: Require SSD mount before K3s starts
-      copy:
-        dest: "/etc/systemd/system/{{ item }}.service.d/10-require-ssd.conf"
+    - name: Ensure systemd-journald drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Bound systemd-journald to protect SSD
+      # INCIDENT-2026-06-30: a noisy node filled the root SSD with persistent
+      # journal data and took the node down. Default journald has no size cap;
+      # cap it explicitly and bound retention to keep the SSD safe.
+      ansible.builtin.copy:
+        dest: /etc/systemd/journald.conf.d/99-bound.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Journal]
+          SystemMaxUse=500M
+          MaxRetentionSec=2week
+      notify: Restart systemd-journald
+
+    - name: Disable unattended-upgrades automatic reboot
+      # Ubuntu's default unattended-upgrades will reboot the node when an
+      # upgrade requires it. For a K3s control plane this can drain etcd
+      # leaders or break Longhorn volume leader election mid-write. Coordinated
+      # reboots should go through kured, not random 4am reboots.
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99-no-auto-reboot
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          // Disable automatic reboot by unattended-upgrades. Coordinated reboots
+          // on a K3s cluster go through kured instead.
+          Unattended-Upgrade::Automatic-Reboot "false";
+
+    - name: Create node-exporter textfile collector directory
+      ansible.builtin.file:
+        path: "{{ pi_health_textfile_directory }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install Raspberry Pi health metrics collector
+      ansible.builtin.template:
+        src: templates/pi-health-metrics.sh.j2
+        dest: /usr/local/sbin/pi-health-metrics
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install Raspberry Pi health metrics service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pi-health-metrics.service
+        owner: root
+        group: root
         mode: '0644'
         content: |
           [Unit]
-          # Never start K3s without the SSD: with nofail in fstab a node can
-          # boot without /mnt/ssd, and K3s would silently write to the SD card
-          # through the empty stub directory (seen on k3s-wrk-04, 2026-07-05).
-          RequiresMountsFor=/mnt/ssd
-          ConditionPathIsMountPoint=/mnt/ssd
-      loop:
-        - k3s
-        - k3s-agent
-      notify: Reload systemd
+          Description=Collect Raspberry Pi temperature and root SSD SMART metrics
+          After=local-fs.target
 
-    - name: Start rsyslog
-      service:
-        name: rsyslog
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/pi-health-metrics
+          User=root
+          Group=root
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          ReadWritePaths={{ pi_health_textfile_directory }}
+
+    - name: Install Raspberry Pi health metrics timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pi-health-metrics.timer
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Collect Raspberry Pi health metrics every minute
+
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=1min
+          RandomizedDelaySec=15s
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable Raspberry Pi health metrics timer
+      ansible.builtin.systemd_service:
+        name: pi-health-metrics.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Collect initial Raspberry Pi health metrics
+      ansible.builtin.command: /usr/local/sbin/pi-health-metrics
+      changed_when: false
+
+    # linux-modules-extra-raspi is only available on Ubuntu for Raspberry Pi.
+    # It provides the iscsi_tcp module needed by Longhorn/iSCSI.
+    - name: Check if linux-modules-extra-raspi is available
+      ansible.builtin.command: apt-cache show linux-modules-extra-raspi
+      register: raspi_modules_check
+      failed_when: false
+      changed_when: false
+      when: not infra_container_test_mode | bool
+
+    - name: Install linux-modules-extra-raspi (Ubuntu Raspberry Pi only)
+      ansible.builtin.apt:
+        name: linux-modules-extra-raspi
+        state: present
+      when:
+        - not infra_container_test_mode | bool
+        - raspi_modules_check.rc == 0
+
+    - name: Check if iscsi_tcp module is loadable
+      ansible.builtin.command: modprobe -n iscsi_tcp
+      register: iscsi_tcp_modprobe
+      failed_when: false
+      changed_when: false
+      when:
+        - not infra_container_test_mode | bool
+        - raspi_modules_check.rc != 0
+
+    - name: Warn if iscsi_tcp module is not available
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: iscsi_tcp module not found. Longhorn iSCSI may not work.
+          Consider installing appropriate kernel modules for your distribution.
+      when:
+        - not infra_container_test_mode | bool
+        - raspi_modules_check.rc != 0
+        - iscsi_tcp_modprobe is defined
+        - iscsi_tcp_modprobe.rc != 0
+
+    - name: Set iscsi_tcp availability
+      ansible.builtin.set_fact:
+        iscsi_tcp_available: >-
+          {{ infra_container_test_mode | bool or raspi_modules_check.rc == 0 or
+             (iscsi_tcp_modprobe is defined and iscsi_tcp_modprobe.rc == 0) }}
+
+    - name: Persist iscsi_tcp module load
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/iscsi-tcp.conf
+        mode: '0644'
+        content: |
+          iscsi_tcp
+      when: iscsi_tcp_available | bool
+
+    - name: Check if iscsi_tcp is already loaded
+      ansible.builtin.command: lsmod
+      register: lsmod_output
+      changed_when: false
+      when:
+        - iscsi_tcp_available | bool
+        - not infra_container_test_mode | bool
+
+    - name: Load iscsi_tcp kernel module
+      ansible.builtin.command: modprobe iscsi_tcp
+      when:
+        - iscsi_tcp_available | bool
+        - not infra_container_test_mode | bool
+        - "'iscsi_tcp' not in (lsmod_output.stdout | default(''))"
+
+    - name: Enable and start iscsid
+      ansible.builtin.systemd:
+        name: iscsid
+        enabled: true
         state: started
 
-    # --- NETWORK PREP (BRIDGE METHOD) ---
+    # --- STORAGE NETWORK (BRIDGE METHOD) ---
     - name: Configure Netplan with Bridge for Storage
-      copy:
+      ansible.builtin.copy:
         dest: /etc/netplan/60-storage.yaml
         content: |
           network:
@@ -285,15 +536,35 @@
                 dhcp4: false
         mode: '0600'
       notify: Apply Netplan
-      # Standardising on br-storage keeps later add-ons simple:
-      # Multus, Whereabouts, and Longhorn can all refer to the same interface name
-      # instead of handling per-node USB NIC naming differences.
+        # Standardising on br-storage keeps later add-ons simple:
+        # Multus, Whereabouts, and Longhorn can all refer to the same interface name
+        # instead of handling per-node USB NIC naming differences.
+
+    - name: Clean apt cache and remove unused packages
+      # After installing linux-modules-extra-raspi and other packages, apt may
+      # have pulled in dependencies that are now unused. Autoremove + autoclean
+      # reclaims 100s of MB on the root SSD.
+      ansible.builtin.apt:
+        autoremove: true
+        autoclean: true
 
   handlers:
-    - name: Apply Netplan
-      command: netplan apply
-    - name: Reload systemd
-      systemd:
-        daemon_reload: true
-    - name: Reboot
-      reboot:
+    - name: Validate Netplan configuration
+      ansible.builtin.command: netplan generate
+      listen: Apply Netplan
+      when:
+        - not ansible_check_mode
+        - not infra_container_test_mode | bool
+
+    - name: Apply Netplan configuration
+      ansible.builtin.command: netplan apply
+      listen: Apply Netplan
+      when:
+        - not ansible_check_mode
+        - not infra_container_test_mode | bool
+
+    - name: Restart systemd-journald
+      ansible.builtin.systemd_service:
+        name: systemd-journald
+        state: restarted
+      listen: Restart systemd-journald

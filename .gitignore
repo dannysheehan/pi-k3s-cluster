@@ -71,3 +71,6 @@ Thumbs.db
 *.key
 secrets/
 credentials/
+.claude/skills/node-triage/SKILL.md
+.claude/skills/alerts-check/SKILL.md
+docs/AI-WORKGROUPS.md

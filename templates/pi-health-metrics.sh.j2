@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+# Render Raspberry Pi temperature and root-SSD SMART health in Prometheus
+# textfile format. Run as root because USB/SCSI SMART access requires it.
+set -uo pipefail
+
+metrics_dir="{{ pi_health_textfile_directory }}"
+output_file="${metrics_dir}/pi-health.prom"
+tmp_file="$(mktemp "${metrics_dir}/.pi-health.prom.XXXXXX")"
+trap 'rm -f "${tmp_file}"' EXIT
+
+scrape_success=1
+
+{
+  printf '# HELP pi_cpu_temperature_celsius Raspberry Pi SoC temperature in degrees Celsius.\n'
+  printf '# TYPE pi_cpu_temperature_celsius gauge\n'
+  thermal_file=/sys/class/thermal/thermal_zone0/temp
+  if [[ -r "${thermal_file}" ]]; then
+    thermal_raw="$(<"${thermal_file}")"
+    if [[ "${thermal_raw}" =~ ^[0-9]+$ ]]; then
+      awk -v value="${thermal_raw}" 'BEGIN { printf "pi_cpu_temperature_celsius %.3f\n", value / 1000 }'
+    else
+      scrape_success=0
+    fi
+  else
+    scrape_success=0
+  fi
+
+  if command -v vcgencmd >/dev/null 2>&1; then
+    throttled="$(vcgencmd get_throttled 2>/dev/null || true)"
+    throttled="${throttled#throttled=0x}"
+    if [[ "${throttled}" =~ ^[0-9a-fA-F]+$ ]]; then
+      printf '# HELP pi_cpu_throttled_bits Raspberry Pi firmware current and historical throttling bitmask.\n'
+      printf '# TYPE pi_cpu_throttled_bits gauge\n'
+      printf 'pi_cpu_throttled_bits %d\n' "$((16#${throttled}))"
+    fi
+  fi
+
+  smart_device="{{ pi_health_smart_device }}"
+  if [[ -z "${smart_device}" ]]; then
+    root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    smart_device="$(lsblk -sno PATH,TYPE "${root_source}" 2>/dev/null | awk '$2 == "disk" { print $1; exit }')"
+  fi
+
+  printf '# HELP pi_root_disk_smart_available Whether SMART health is readable for the root disk.\n'
+  printf '# TYPE pi_root_disk_smart_available gauge\n'
+  if [[ -n "${smart_device}" ]] && command -v smartctl >/dev/null 2>&1; then
+    smart_output="$(smartctl -d {{ pi_health_smart_device_type | quote }} -H "${smart_device}" 2>&1)"
+    smart_rc=$?
+    if grep -Eq 'SMART Health Status:[[:space:]]*OK|SMART overall-health self-assessment test result:[[:space:]]*PASSED' <<<"${smart_output}"; then
+      printf 'pi_root_disk_smart_available{device="%s",device_type="{{ pi_health_smart_device_type }}"} 1\n' "${smart_device}"
+      printf '# HELP pi_root_disk_smart_healthy Whether the root disk reports a passing SMART health status.\n'
+      printf '# TYPE pi_root_disk_smart_healthy gauge\n'
+      printf 'pi_root_disk_smart_healthy{device="%s",device_type="{{ pi_health_smart_device_type }}"} 1\n' "${smart_device}"
+    elif (( (smart_rc & 8) != 0 )) || grep -Eq 'FAILED|FAILURE' <<<"${smart_output}"; then
+      printf 'pi_root_disk_smart_available{device="%s",device_type="{{ pi_health_smart_device_type }}"} 1\n' "${smart_device}"
+      printf '# HELP pi_root_disk_smart_healthy Whether the root disk reports a passing SMART health status.\n'
+      printf '# TYPE pi_root_disk_smart_healthy gauge\n'
+      printf 'pi_root_disk_smart_healthy{device="%s",device_type="{{ pi_health_smart_device_type }}"} 0\n' "${smart_device}"
+    else
+      printf 'pi_root_disk_smart_available{device="%s",device_type="{{ pi_health_smart_device_type }}"} 0\n' "${smart_device}"
+      scrape_success=0
+    fi
+  else
+    printf 'pi_root_disk_smart_available{device="unknown",device_type="{{ pi_health_smart_device_type }}"} 0\n'
+    scrape_success=0
+  fi
+
+  printf '# HELP pi_health_metrics_scrape_success Whether temperature and SMART collection completed successfully.\n'
+  printf '# TYPE pi_health_metrics_scrape_success gauge\n'
+  printf 'pi_health_metrics_scrape_success %d\n' "${scrape_success}"
+} >"${tmp_file}"
+
+chmod 0644 "${tmp_file}"
+mv -f "${tmp_file}" "${output_file}"
+trap - EXIT

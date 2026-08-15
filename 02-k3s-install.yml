@@ -1,284 +1,238 @@
 ---
-# ============================================================================
-# Raspberry Pi K3s Cluster - K3s Installation Playbook
-# ============================================================================
-#
-# ⚠️  WARNING: This playbook is for INITIAL CLUSTER BOOTSTRAP ONLY!
-#
-# For day-2 operations (adding/removing nodes), use the dedicated playbooks:
-#   - k3s-add-worker.yml     Add worker nodes to existing cluster
-#   - k3s-remove-worker.yml  Remove worker nodes from cluster
-#   - k3s-add-master.yml     Add master nodes for HA
-#   - k3s-remove-master.yml  Remove master nodes from HA cluster
-#
-# Running this playbook on an existing cluster may cause service disruption!
-#
-# ============================================================================
-#
-# This playbook installs K3s on the control plane and worker nodes.
-#
-# Key Configuration Flags:
-# - --cluster-init: Enables embedded etcd for HA control plane
-# - --flannel-backend=none: Disables default Flannel CNI (Cilium will provide CNI)
-# - --disable-network-policy: Disables K3s network policies (Cilium will handle)
-# - --disable-kube-proxy: Disables kube-proxy (Cilium replaces it with eBPF)
-# - --disable servicelb: Disables Klipper LoadBalancer (Cilium L2 will provide)
-# - --disable traefik: Disables default Traefik (we install via Helm for Gateway API)
-#
-# Prerequisites:
-# - Infrastructure prepared (01-infra-prep.yml completed)
-# - USB SSDs mounted at /mnt/ssd
-# - Nodes accessible via SSH
-#
-# Post-Installation:
-# - Nodes will show as "NotReady" until Cilium is installed (03-addons.yml)
-# - Kubeconfig is fetched to ~/.kube/config-rpi and updated with master IP
-#
-# ============================================================================
+# Initial bootstrap only. It creates the first embedded-etcd server and joins
+# agents through the API VIP. Add the remaining servers with k3s-add-master.yml
+# one at a time; never rerun this playbook against a live cluster.
 
-- name: Safety Check - Prevent Accidental Re-runs
+- name: Guard initial K3s bootstrap
   hosts: "{{ groups['masters'][0] }}"
-  gather_facts: no
-  become: yes
-  vars:
-    force_reinstall: false
+  gather_facts: false
+  become: true
   tasks:
-    - name: Check if K3s is already running
-      command: systemctl is-active k3s
+    - name: Check whether K3s is already active
+      ansible.builtin.command: systemctl is-active k3s
       register: k3s_running
-      failed_when: false
       changed_when: false
+      failed_when: false
 
-    - name: Check if cluster has nodes
-      command: kubectl get nodes
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: cluster_nodes
-      failed_when: false
-      changed_when: false
+    - name: Refuse to rerun bootstrap on an existing control plane
+      ansible.builtin.fail:
+        msg: >-
+          K3s is already active on {{ inventory_hostname }}. Use the dedicated
+          day-2 node playbooks; this bootstrap playbook must not be rerun.
       when: k3s_running.rc == 0
-      # The presence of a responding API plus existing nodes means this is not a
-      # first bootstrap anymore; day-2 changes should go through the dedicated playbooks.
 
-    - name: Fail if cluster already exists (unless force_reinstall=true)
-      fail:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║  ⚠️  CLUSTER ALREADY EXISTS - ABORTING                           ║
-          ╠══════════════════════════════════════════════════════════════════╣
-          ║  K3s is already running on the control plane.                    ║
-          ║  Running this playbook may cause service disruption!             ║
-          ║                                                                  ║
-          ║  For day-2 operations, use the dedicated playbooks:              ║
-          ║    • k3s-add-worker.yml     - Add worker nodes                   ║
-          ║    • k3s-remove-worker.yml  - Remove worker nodes                ║
-          ║    • k3s-add-master.yml     - Add HA master nodes                ║
-          ║    • k3s-remove-master.yml  - Remove master nodes                ║
-          ║                                                                  ║
-          ║  To force reinstall (DESTRUCTIVE), use:                          ║
-          ║    ansible-playbook 02-k3s-install.yml -e force_reinstall=true   ║
-          ╚══════════════════════════════════════════════════════════════════╝
-      when: k3s_running.rc == 0 and not (force_reinstall | bool)
-
-    - name: Display warning for force reinstall
-      debug:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║  ⚠️  FORCE REINSTALL MODE - PROCEEDING WITH CAUTION              ║
-          ╠══════════════════════════════════════════════════════════════════╣
-          ║  force_reinstall=true was specified.                             ║
-          ║  This will reinstall K3s on all nodes.                           ║
-          ╚══════════════════════════════════════════════════════════════════╝
-      when: k3s_running.rc == 0 and (force_reinstall | bool)
-
-- name: Install K3s Control Plane
-  hosts: masters
-  become: yes
-  vars:
-    # Critical Fix #1: Added --cluster-init for embedded etcd initialisation
-    # Common flags for control plane
-    k3s_args: >-
-      --cluster-init
-      --data-dir /mnt/ssd/k3s
-      --flannel-backend=none
-      --disable-network-policy
-      --disable-kube-proxy
-      --disable servicelb
-      --disable traefik
-    # These flags intentionally leave networking/inress incomplete until 03-addons.yml.
-    # A NotReady node immediately after this play is expected.
+- name: Bootstrap first K3s server and API VIP
+  hosts: "{{ groups['masters'][0] }}"
+  gather_facts: false
+  become: true
   tasks:
-    # /mnt/ssd is nofail (01-infra-prep.yml): the directory exists even when
-    # the SSD is dead, so verify it is a real mountpoint before installing —
-    # otherwise K3s data lands on the SD card through the empty stub.
-    - name: Verify /mnt/ssd is a real mountpoint
-      command: findmnt -n /mnt/ssd
+    - name: Create K3s configuration directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s/config.yaml.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Create K3s auto-deploy manifest directory
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s/server/manifests
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Render common K3s server configuration
+      ansible.builtin.template:
+        src: templates/k3s/server-config.yaml.j2
+        dest: /etc/rancher/k3s/config.yaml
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Render bootstrap-only K3s configuration
+      ansible.builtin.template:
+        src: templates/k3s/bootstrap-config.yaml.j2
+        dest: /etc/rancher/k3s/config.yaml.d/10-bootstrap.yaml
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Render kube-vip RBAC manifest
+      ansible.builtin.template:
+        src: templates/k3s/kube-vip-rbac.yaml.j2
+        dest: /var/lib/rancher/k3s/server/manifests/kube-vip-rbac.yaml
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Render kube-vip control-plane DaemonSet manifest
+      ansible.builtin.template:
+        src: templates/k3s/kube-vip-daemonset.yaml.j2
+        dest: /var/lib/rancher/k3s/server/manifests/kube-vip-daemonset.yaml
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Check whether the K3s server unit exists
+      ansible.builtin.command: systemctl list-unit-files k3s.service
+      register: k3s_server_unit
       changed_when: false
+      failed_when: false
 
-    - name: Install K3s on Control Plane
-      shell: |
-        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ k3s_version }} sh -s - server \
-        --tls-san {{ master_ip }} \
-        --tls-san {{ inventory_hostname }} \
-        {{ k3s_args }}
-      args:
-        creates: /mnt/ssd/k3s/server/node-token
+    - name: Download verified K3s installer
+      ansible.builtin.get_url:
+        url: "{{ k3s_install_script_url }}"
+        dest: /usr/local/src/k3s-install.sh
+        checksum: "{{ k3s_install_script_checksum }}"
+        owner: root
+        group: root
+        mode: '0755'
 
-    - name: Wait for K3s to be ready
-      command: kubectl get nodes
+    - name: Install the first K3s server
+      ansible.builtin.command: /usr/local/src/k3s-install.sh
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+        INSTALL_K3S_EXEC: server
+      when: "'k3s.service' not in k3s_server_unit.stdout"
+
+    - name: Wait for the local K3s API
+      ansible.builtin.command: kubectl get --raw=/healthz
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: k3s_ready
-      until: k3s_ready.rc == 0
+      register: local_api_health
+      until: local_api_health.rc == 0
       retries: 30
       delay: 10
-
-    - name: Get Node Token
-      command: cat /mnt/ssd/k3s/server/node-token
-      register: node_token
       changed_when: false
 
-- name: Install K3s Workers
-  hosts: workers
-  become: yes
-  vars:
-    # Workers join with explicit node-name and --with-node-id to avoid
-    # duplicate password/hostname conflicts when rejoining.
-    k3s_args: "--data-dir /mnt/ssd/k3s --with-node-id --node-name {{ inventory_hostname }}"
-  tasks:
-    # See the identical check in the control-plane play above.
-    - name: Verify /mnt/ssd is a real mountpoint
-      command: findmnt -n /mnt/ssd
-      changed_when: false
+    - name: Configure crictl for the K3s runtime
+      ansible.builtin.include_tasks: tasks/configure-crictl.yml
 
-    - name: Wait for control plane node-token to exist
-      stat:
-        path: /mnt/ssd/k3s/server/node-token
-      register: node_token_stat
-      delegate_to: "{{ groups['masters'][0] }}"
-      run_once: true
-      until: node_token_stat.stat.exists
-      retries: 12
-      delay: 10
-      changed_when: false
+    - name: Install host CNI plugins required by the storage-network NAD
+      ansible.builtin.include_tasks: tasks/install-storage-cni-plugins.yml
 
-    - name: Get Node Token
-      command: cat /mnt/ssd/k3s/server/node-token
-      register: node_token
-      delegate_to: "{{ groups['masters'][0] }}"
-      run_once: true
-      changed_when: false
-
-    - name: Wait for K3s API to be reachable
-      command: kubectl get --raw=/healthz
+    - name: Wait for kube-vip DaemonSet creation
+      ansible.builtin.command: kubectl -n kube-system get daemonset kube-vip
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      delegate_to: "{{ groups['masters'][0] }}"
-      register: api_health
-      until: api_health.rc == 0
-      retries: 12
-      delay: 10
-      changed_when: false
-      # Workers depend on the API being live before joining; this keeps failures
-      # readable and avoids half-configured agents.
-
-    - name: Check if node already exists on control plane and is not Ready
-      command: kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      delegate_to: "{{ groups['masters'][0] }}"
-      register: node_ready_status
-      failed_when: false
-      changed_when: false
-
-    - name: Delete stale node from control plane if not Ready
-      command: kubectl delete node {{ inventory_hostname }}
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      delegate_to: "{{ groups['masters'][0] }}"
-      when: node_ready_status.rc == 0 and node_ready_status.stdout != 'True'
-      changed_when: true
-
-    - name: Determine whether worker needs recovery
-      set_fact:
-        needs_worker_recovery: "{{ node_ready_status.rc == 0 and node_ready_status.stdout != 'True' }}"
-      # "running but NotReady" is a common bad state after failed joins or CNI churn.
-      # Treat it as recovery, not as a healthy agent, so we actually clean up and rejoin.
-
-    - name: Check current k3s-agent service state
-      command: systemctl is-active k3s-agent
-      register: agent_state
-      failed_when: false
-      changed_when: false
-
-    - name: Stop k3s-agent service if present
-      systemd:
-        name: k3s-agent
-        state: stopped
-      failed_when: false
-      when: agent_state.stdout == 'active' or needs_worker_recovery
-
-    - name: Remove stale node password
-      file:
-        path: /etc/rancher/node
-        state: absent
-      when: agent_state.stdout != 'active' or needs_worker_recovery
-      # K3s stores per-node join identity here. Removing it is often necessary when
-      # reusing a hostname after a failed join or stale registration.
-
-    - name: Remove stale agent data directory
-      file:
-        path: /mnt/ssd/k3s/agent
-        state: absent
-      when: agent_state.stdout != 'active' or needs_worker_recovery
-
-    - name: Install K3s Agent
-      shell: |
-        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ k3s_version }} \
-        K3S_URL=https://{{ master_ip }}:6443 \
-        K3S_TOKEN={{ node_token.stdout }} \
-        K3S_NODE_NAME={{ inventory_hostname }} sh -s - \
-        {{ k3s_args }}
-      when: agent_state.stdout != 'active' or needs_worker_recovery
-
-    # Note: We only verify the k3s-agent service is running, not that the node
-    # is Ready. Nodes won't become Ready until Cilium CNI is installed in
-    # 03-addons.yml (because K3s is installed with --flannel-backend=none)
-    - name: Wait for K3s agent service to be registered
-      command: systemctl list-unit-files k3s-agent.service
-      register: service_check
-      until: service_check.stdout is search('k3s-agent.service')
-      retries: 12
+      register: kube_vip_daemonset
+      until: kube_vip_daemonset.rc == 0
+      retries: 30
       delay: 5
       changed_when: false
 
-    - name: Verify K3s agent is running
-      command: systemctl is-active k3s-agent
+    - name: Wait for API VIP TCP reachability
+      ansible.builtin.wait_for:
+        host: "{{ api_vip }}"
+        port: 6443
+        timeout: 300
+        connect_timeout: 5
+
+    - name: Wait for API health through the VIP
+      ansible.builtin.command: >-
+        kubectl --server=https://{{ api_vip }}:6443 get --raw=/healthz
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: vip_api_health
+      until: vip_api_health.rc == 0
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Read bootstrap node token for agent joins
+      ansible.builtin.command: cat /var/lib/rancher/k3s/server/node-token
+      register: bootstrap_node_token
+      changed_when: false
+      no_log: true
+
+- name: Join initial K3s agents through the API VIP
+  hosts: workers
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Create K3s configuration directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Render K3s agent configuration
+      ansible.builtin.template:
+        src: templates/k3s/agent-config.yaml.j2
+        dest: /etc/rancher/k3s/config.yaml
+        owner: root
+        group: root
+        mode: '0600'
+      vars:
+        k3s_join_token: "{{ hostvars[groups['masters'][0]].bootstrap_node_token.stdout }}"
+      no_log: true
+
+    - name: Check whether the K3s agent unit exists
+      ansible.builtin.command: systemctl list-unit-files k3s-agent.service
+      register: k3s_agent_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Download verified K3s installer
+      ansible.builtin.get_url:
+        url: "{{ k3s_install_script_url }}"
+        dest: /usr/local/src/k3s-install.sh
+        checksum: "{{ k3s_install_script_checksum }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install K3s agent through the API VIP
+      ansible.builtin.command: /usr/local/src/k3s-install.sh
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+        INSTALL_K3S_EXEC: agent
+      when: "'k3s-agent.service' not in k3s_agent_unit.stdout"
+
+    - name: Wait for K3s agent service
+      ansible.builtin.command: systemctl is-active k3s-agent
       register: agent_active
       until: agent_active.rc == 0
-      retries: 10
-      delay: 5
+      retries: 30
+      delay: 10
       changed_when: false
 
-- name: Fetch Kubeconfig to Control Node
+    - name: Configure crictl for the K3s runtime
+      ansible.builtin.include_tasks: tasks/configure-crictl.yml
+
+    - name: Install host CNI plugins required by the storage-network NAD
+      ansible.builtin.include_tasks: tasks/install-storage-cni-plugins.yml
+
+    - name: Wait for agent node registration
+      ansible.builtin.command: kubectl get node {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: agent_registered
+      until: agent_registered.rc == 0
+      retries: 30
+      delay: 5
+      changed_when: false
+      # NotReady is expected here until Cilium is installed.
+
+- name: Fetch VIP-based kubeconfig to control node
   hosts: "{{ groups['masters'][0] }}"
-  become: yes
+  gather_facts: false
+  become: true
   tasks:
-    - name: Copy kubeconfig to user home
-      fetch:
+    - name: Copy kubeconfig to control node
+      ansible.builtin.fetch:
         src: /etc/rancher/k3s/k3s.yaml
         dest: ~/.kube/config-rpi
-        flat: yes
+        flat: true
 
-    - name: Update kubeconfig server address
-      delegate_to: localhost
-      become: no
-      lineinfile:
+    - name: Rewrite kubeconfig API endpoint to the VIP
+      ansible.builtin.lineinfile:
         path: ~/.kube/config-rpi
         regexp: '^\s+server:\s+https://127\.0\.0\.1:6443'
-        line: "    server: https://{{ master_ip }}:6443"
-        backup: yes
-      # K3s writes 127.0.0.1 into the local kubeconfig; rewrite it so the config
-      # works from the Ansible/control machine without manual editing.
+        line: "    server: https://{{ api_vip }}:6443"
+      delegate_to: localhost
+      become: false

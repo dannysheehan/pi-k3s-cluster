@@ -1,0 +1,3 @@
+---
+- name: Converge infra preparation in a disposable Ubuntu 26.04 container
+  import_playbook: ../../01-infra-prep.yml

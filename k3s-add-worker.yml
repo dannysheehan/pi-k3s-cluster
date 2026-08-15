@@ -1,249 +1,129 @@
 ---
-# ============================================================================
-# k3s-add-worker.yml - Add Worker Nodes to Existing K3s Cluster
-# ============================================================================
-#
-# USAGE: ansible-playbook k3s-add-worker.yml --limit <node-name>
-#
-# This playbook safely adds worker nodes to an existing K3s cluster WITHOUT
-# touching the control plane. The --limit flag is REQUIRED.
-#
-# Examples:
-#   # Add a single worker
-#   ansible-playbook k3s-add-worker.yml --limit k3s-wrk-04
-#
-#   # Add multiple workers
-#   ansible-playbook k3s-add-worker.yml --limit 'k3s-wrk-04,k3s-wrk-05'
-#
-# Prerequisites:
-#   - Control plane already running (02-k3s-install.yml completed)
-#   - Infrastructure prepared on target node (01-infra-prep.yml completed)
-#   - Node added to [workers] group in hosts.ini
-#
-# Safety Features:
-#   - Requires --limit flag (fails without it)
-#   - Never modifies control plane
-#   - Idempotent - safe to run on already-joined nodes
-#   - Validates prerequisites before joining
-#
-# ============================================================================
+# Add exactly one agent through the API VIP:
+# ansible-playbook k3s-add-worker.yml --limit <one-agent>
 
-- name: Validate Execution Parameters
-  hosts: localhost
-  gather_facts: no
-  tasks:
-    - name: Fail if no --limit specified
-      fail:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║  ERROR: You must specify --limit to target specific nodes        ║
-          ╠══════════════════════════════════════════════════════════════════╣
-          ║  This playbook requires explicit node targeting to prevent       ║
-          ║  accidental runs against all workers.                            ║
-          ║                                                                  ║
-          ║  Usage:                                                          ║
-          ║    ansible-playbook k3s-add-worker.yml --limit k3s-wrk-04        ║
-          ║    ansible-playbook k3s-add-worker.yml --limit 'wrk-04,wrk-05'   ║
-          ╚══════════════════════════════════════════════════════════════════╝
-      when: ansible_limit is not defined
-
-- name: Add Worker Nodes to K3s Cluster
+- name: Add one K3s agent
   hosts: workers
-  become: yes
-  vars:
-    k3s_args: "--data-dir /mnt/ssd/k3s --with-node-id --node-name {{ inventory_hostname }}"
+  gather_facts: false
+  become: true
+  pre_tasks:
+    - name: Require an explicit single-host inventory limit
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_play_hosts_all | length == 1
+        fail_msg: Target exactly one agent with --limit <node>.
+
+    - name: Check API health on control-plane servers
+      ansible.builtin.command: kubectl get --raw=/healthz
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['masters'] }}"
+      register: master_health
+      changed_when: false
+      failed_when: false
+
+    - name: Choose a healthy control-plane server
+      ansible.builtin.set_fact:
+        healthy_delegate: >-
+          {{ (master_health.results
+              | selectattr('rc', 'equalto', 0)
+              | map(attribute='item') | list | first) | default('') }}
+
+    - name: Require a healthy control-plane server
+      ansible.builtin.assert:
+        that:
+          - healthy_delegate | length > 0
+        fail_msg: No healthy control-plane server can coordinate the agent join.
+
+    - name: Read agent join token
+      ansible.builtin.command: cat /var/lib/rancher/k3s/server/node-token
+      delegate_to: "{{ healthy_delegate }}"
+      register: agent_join_token
+      changed_when: false
+      no_log: true
+
   tasks:
-    # -------------------------------------------------------------------------
-    # Control Plane Validation (delegated so --limit doesn't skip it)
-    # -------------------------------------------------------------------------
-    - name: Check K3s API is reachable
-      command: kubectl get --raw=/healthz
+    - name: Check whether a K3s agent unit exists
+      ansible.builtin.command: systemctl list-unit-files k3s-agent.service
+      register: k3s_agent_unit
+      changed_when: false
+      failed_when: false
+
+    - name: Download verified K3s installer
+      ansible.builtin.get_url:
+        url: "{{ k3s_install_script_url }}"
+        dest: /usr/local/src/k3s-install.sh
+        checksum: "{{ k3s_install_script_checksum }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Check K3s agent state when installed
+      ansible.builtin.command: systemctl is-active k3s-agent
+      register: k3s_agent_state
+      changed_when: false
+      failed_when: false
+      when: "'k3s-agent.service' in k3s_agent_unit.stdout"
+
+    - name: Refuse automatic recovery of inactive K3s agent state
+      ansible.builtin.fail:
+        msg: >-
+          K3s agent is installed but inactive on {{ inventory_hostname }}.
+          Investigate before replacing its local state.
+      when:
+        - "'k3s-agent.service' in k3s_agent_unit.stdout"
+        - k3s_agent_state.rc != 0
+
+    - name: Create K3s configuration directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Render K3s agent configuration
+      ansible.builtin.template:
+        src: templates/k3s/agent-config.yaml.j2
+        dest: /etc/rancher/k3s/config.yaml
+        owner: root
+        group: root
+        mode: '0600'
+      vars:
+        k3s_join_token: "{{ agent_join_token.stdout }}"
+      no_log: true
+
+    - name: Install K3s agent through the API VIP
+      ansible.builtin.command: /usr/local/src/k3s-install.sh
       environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      delegate_to: "{{ groups['masters'][0] }}"
-      run_once: true
-      changed_when: false
-      failed_when: api_health.rc != 0
-      register: api_health
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+        INSTALL_K3S_EXEC: agent
+      when: "'k3s-agent.service' not in k3s_agent_unit.stdout"
 
-    - name: Get node token from control plane
-      command: cat /mnt/ssd/k3s/server/node-token
-      delegate_to: "{{ groups['masters'][0] }}"
-      run_once: true
-      register: node_token_result
-      changed_when: false
-
-    # -------------------------------------------------------------------------
-    # Prerequisite Validation
-    # -------------------------------------------------------------------------
-    # With nofail in fstab (01-infra-prep.yml), /mnt/ssd always EXISTS as a
-    # directory even when the SSD is dead — a stat/exists check passes on the
-    # empty SD-card stub and K3s would install onto the SD card (this bit
-    # k3s-wrk-04 on 2026-07-05). Check for a real mountpoint instead.
-    - name: Check /mnt/ssd is a real mountpoint (not the SD-card stub)
-      command: findmnt -n /mnt/ssd
-      register: ssd_mount
-      changed_when: false
-      failed_when: false
-
-    - name: Check if K3s directory exists on SSD
-      stat:
-        path: /mnt/ssd/k3s
-      register: ssd_k3s_dir
-
-    - name: Check K3s SSD-guard drop-in exists
-      stat:
-        path: /etc/systemd/system/k3s-agent.service.d/10-require-ssd.conf
-      register: ssd_guard
-
-    - name: Fail if infrastructure not prepared
-      fail:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║  ERROR: Infrastructure not prepared on {{ inventory_hostname }}  ║
-          ╠══════════════════════════════════════════════════════════════════╣
-          ║  /mnt/ssd is not a mounted filesystem, the K3s directory is      ║
-          ║  missing, or the SSD systemd guard (10-require-ssd.conf) is      ║
-          ║  absent.                                                         ║
-          ║                                                                  ║
-          ║  Please run infrastructure preparation first:                    ║
-          ║    ansible-playbook 01-infra-prep.yml --limit {{ inventory_hostname }}
-          ╚══════════════════════════════════════════════════════════════════╝
-      when: ssd_mount.rc != 0 or not ssd_k3s_dir.stat.exists or not ssd_guard.stat.exists
-
-    # -------------------------------------------------------------------------
-    # Idempotency Check - Skip if Already Joined
-    # -------------------------------------------------------------------------
-    - name: Check if k3s-agent service exists
-      command: systemctl list-unit-files k3s-agent.service
-      register: agent_service_exists
-      failed_when: false
-      changed_when: false
-
-    - name: Check if k3s-agent is running
-      command: systemctl is-active k3s-agent
-      register: agent_status
-      failed_when: false
-      changed_when: false
-      when: agent_service_exists.rc == 0 and 'k3s-agent.service' in agent_service_exists.stdout
-
-    - name: Check if node exists in cluster (prefix match for --with-node-id)
-      shell: |
-        node=$(kubectl get nodes -o name | grep '^node/{{ inventory_hostname }}\b' | head -1 | sed 's|^node/||')
-        if [ -z "$node" ]; then exit 1; fi
-        ready=$(kubectl get node "$node" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
-        echo "${node}:${ready}"
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      delegate_to: "{{ groups['masters'][0] }}"
-      register: node_ready_status
-      failed_when: false
-      changed_when: false
-
-    - name: Parse node name and ready status
-      set_fact:
-        matched_node_name: "{{ node_ready_status.stdout.split(':')[0] }}"
-        matched_node_ready: "{{ node_ready_status.stdout.split(':')[1] | default('') }}"
-      when: node_ready_status.rc == 0
-
-    - name: Set already_joined fact
-      set_fact:
-        already_joined: "{{ (agent_status.rc | default(1)) == 0 and node_ready_status.rc == 0 }}"
-
-    - name: Display status for already joined nodes
-      debug:
-        msg: |
-          ✓ Node {{ matched_node_name | default(inventory_hostname) }} is already joined to the cluster
-          ✓ Agent status: {{ 'running' if (agent_status.rc | default(1)) == 0 else 'not running' }}
-          ✓ Node ready: {{ matched_node_ready | default('unknown') }}
-
-          Skipping installation - node is healthy.
-      when: already_joined
-
-    # -------------------------------------------------------------------------
-    # Clean Up Stale State (if agent not running but remnants exist)
-    # -------------------------------------------------------------------------
-    - name: Check for stale node in cluster (not Ready)
-      set_fact:
-        stale_node: "{{ node_ready_status.rc == 0 and (matched_node_ready | default('')) != 'True' and not already_joined }}"
-
-    - name: Delete stale node from cluster
-      command: kubectl delete node {{ matched_node_name | default(inventory_hostname) }}
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      delegate_to: "{{ groups['masters'][0] }}"
-      when: stale_node
-      changed_when: true
-
-    - name: Stop stale k3s-agent service
-      systemd:
-        name: k3s-agent
-        state: stopped
-      failed_when: false
-      when: stale_node and agent_service_exists.rc == 0
-
-    - name: Remove stale node password
-      file:
-        path: /etc/rancher/node
-        state: absent
-      when: stale_node
-
-    - name: Remove stale agent data directory
-      file:
-        path: /mnt/ssd/k3s/agent
-        state: absent
-      when: stale_node
-
-    # -------------------------------------------------------------------------
-    # Install K3s Agent
-    # -------------------------------------------------------------------------
-    - name: Install K3s agent
-      shell: |
-        curl -sfL https://get.k3s.io | \
-        INSTALL_K3S_VERSION={{ k3s_version }} \
-        K3S_URL=https://{{ master_ip }}:6443 \
-        K3S_TOKEN={{ node_token_result.stdout }} \
-        K3S_NODE_NAME={{ inventory_hostname }} \
-        sh -s - {{ k3s_args }}
-      when: not already_joined
-      register: install_result
-
-    # -------------------------------------------------------------------------
-    # Verify Installation
-    # -------------------------------------------------------------------------
-    - name: Wait for k3s-agent service to be active
-      command: systemctl is-active k3s-agent
+    - name: Wait for K3s agent service
+      ansible.builtin.command: systemctl is-active k3s-agent
       register: agent_active
       until: agent_active.rc == 0
-      retries: 24
-      delay: 10
-      changed_when: false
-      when: not already_joined
-
-    - name: Wait for node to appear in cluster
-      shell: kubectl get nodes -o name | grep -q 'node/{{ inventory_hostname }}'
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      delegate_to: "{{ groups['masters'][0] }}"
-      register: node_check
-      until: node_check.rc == 0
       retries: 30
       delay: 10
       changed_when: false
-      when: not already_joined
 
-    - name: Display success message
-      debug:
-        msg: |
+    - name: Configure crictl for the K3s runtime
+      ansible.builtin.include_tasks: tasks/configure-crictl.yml
 
-          ╔══════════════════════════════════════════════════════════════════╗
-          ║  ✓ Successfully added {{ inventory_hostname }} to the cluster    ║
-          ╠══════════════════════════════════════════════════════════════════╣
-          ║  The node has joined but may show as "NotReady" until Cilium     ║
-          ║  CNI is installed (if not already present).                      ║
-          ║                                                                  ║
-          ║  Verify with: kubectl get nodes                                  ║
-          ╚══════════════════════════════════════════════════════════════════╝
-      when: not already_joined and install_result is changed
+    - name: Install host CNI plugins required by the storage-network NAD
+      ansible.builtin.include_tasks: tasks/install-storage-cni-plugins.yml
+
+    - name: Wait for agent node registration
+      ansible.builtin.command: kubectl get node {{ inventory_hostname }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      delegate_to: "{{ healthy_delegate }}"
+      register: agent_registered
+      until: agent_registered.rc == 0
+      retries: 30
+      delay: 5
+      changed_when: false
+      # NotReady is expected until Cilium is installed.

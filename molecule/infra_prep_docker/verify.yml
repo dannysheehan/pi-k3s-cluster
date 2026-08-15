@@ -1,0 +1,83 @@
+---
+- name: Verify infrastructure preparation contract
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Assert Longhorn host packages are installed
+      ansible.builtin.assert:
+        that:
+          - "'open-iscsi' in ansible_facts.packages"
+          - "'nfs-common' in ansible_facts.packages"
+          - "'smartmontools' in ansible_facts.packages"
+          - "'lm-sensors' in ansible_facts.packages"
+
+    - name: Read Raspberry Pi health metrics output
+      ansible.builtin.slurp:
+        src: /var/lib/node_exporter/textfile_collector/pi-health.prom
+      register: pi_health_metrics
+
+    - name: Assert Raspberry Pi health collector contract
+      ansible.builtin.assert:
+        that:
+          - "'pi_health_metrics_scrape_success' in (pi_health_metrics.content | b64decode)"
+          - "'pi_root_disk_smart_available' in (pi_health_metrics.content | b64decode)"
+
+    - name: Read rendered storage Netplan
+      ansible.builtin.slurp:
+        src: /etc/netplan/60-storage.yaml
+      register: storage_netplan
+
+    - name: Stat rendered storage Netplan
+      ansible.builtin.stat:
+        path: /etc/netplan/60-storage.yaml
+      register: storage_netplan_stat
+
+    - name: Assert storage Netplan contract and restrictive permissions
+      ansible.builtin.assert:
+        that:
+          - storage_netplan_stat.stat.mode == '0600'
+          - "'br-storage:' in (storage_netplan.content | b64decode)"
+          - "'192.168.10.250/24' in (storage_netplan.content | b64decode)"
+          - "'02:00:00:00:00:fa' in (storage_netplan.content | b64decode)"
+          - "'interfaces: [usb-adapter]' in (storage_netplan.content | b64decode)"
+
+    - name: Stat persisted iSCSI module configuration
+      ansible.builtin.stat:
+        path: /etc/modules-load.d/iscsi-tcp.conf
+      register: iscsi_module_config
+
+    - name: Assert iSCSI module configuration was rendered
+      ansible.builtin.assert:
+        that:
+          - iscsi_module_config.stat.exists
+          - iscsi_module_config.stat.mode == '0644'
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Assert iscsid is enabled and running when systemd exposes it
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['iscsid.service'].status == 'enabled'
+          - ansible_facts.services['iscsid.service'].state == 'running'
+      when: "'iscsid.service' in ansible_facts.services"
+
+    - name: Check legacy SSD relocation paths are absent
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /mnt/ssd
+        - /etc/fstab.d/k3s-ssd
+      register: legacy_ssd_paths
+
+    - name: Assert test did not create legacy SSD relocation paths
+      ansible.builtin.assert:
+        that: not item.stat.exists
+      loop: "{{ legacy_ssd_paths.results }}"
+      loop_control:
+        label: "{{ item.item }}"

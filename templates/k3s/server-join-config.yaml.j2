@@ -1,0 +1,4 @@
+---
+# Managed by Ansible; joining servers use the API VIP, never an individual node.
+server: https://{{ api_vip }}:6443
+token: {{ k3s_join_token }}

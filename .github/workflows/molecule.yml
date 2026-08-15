@@ -1,0 +1,41 @@
+name: Molecule
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: molecule-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  infra-prep-docker:
+    name: Ubuntu 26.04 infra preparation
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync Molecule test dependencies
+        run: uv sync --locked --no-dev --group test
+
+      - name: Install Ansible collections
+        run: |
+          uv run --no-sync --no-dev --group test ansible-galaxy collection install -r requirements.yml -p ./collections
+          uv run --no-sync --no-dev --group test ansible-galaxy collection install -r molecule/infra_prep_docker/collections.yml -p ./collections
+
+      - name: Run infra preparation Molecule scenario
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ansible.ci.cfg
+          ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/collections
+        run: uv run --no-sync --no-dev --group test molecule test -s infra_prep_docker

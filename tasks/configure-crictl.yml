@@ -1,0 +1,20 @@
+---
+- name: Configure crictl for K3s containerd
+  ansible.builtin.copy:
+    dest: /etc/crictl.yaml
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      runtime-endpoint: unix:///run/k3s/containerd/containerd.sock
+      image-endpoint: unix:///run/k3s/containerd/containerd.sock
+      timeout: 10
+      debug: false
+
+- name: Verify crictl can reach K3s containerd
+  ansible.builtin.command: crictl info
+  register: crictl_info
+  until: crictl_info.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false

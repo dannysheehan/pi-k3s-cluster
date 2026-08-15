@@ -2,67 +2,69 @@
 
 set -euo pipefail
 
-TARGET="${1:-}"
-DEVICE="${2:-}"
+target="${1:-}"
+requested_device="${2:-}"
+smart_type="${3:-scsi}"
 
-if [[ -z "$TARGET" ]]; then
-  echo "Usage: $0 <ssh-target> [device]" >&2
-  echo "Example: $0 192.168.1.45 /dev/sdb" >&2
+if [[ -z "$target" ]]; then
+  echo "Usage: $0 <ssh-target> [device] [smartctl-device-type]" >&2
+  echo "Example: $0 pi-wrk-02 /dev/sda scsi" >&2
   exit 1
 fi
 
-if [[ -n "$DEVICE" ]]; then
-  REMOTE_DEVICE="$DEVICE"
-else
-  REMOTE_DEVICE=''
+if [[ -n "$requested_device" && ! "$requested_device" =~ ^/dev/[a-zA-Z0-9._/-]+$ ]]; then
+  echo "Device must be an absolute /dev path" >&2
+  exit 1
+fi
+if [[ ! "$smart_type" =~ ^[a-zA-Z0-9,+_-]+$ ]]; then
+  echo "Invalid smartctl device type" >&2
+  exit 1
 fi
 
-ssh "$TARGET" "SSD_DEVICE=$REMOTE_DEVICE bash -s" <<'EOF'
+ssh "$target" bash -s -- "$requested_device" "$smart_type" <<'EOF'
 set -euo pipefail
 
-device="${SSD_DEVICE:-}"
-mount_source="$(findmnt -n -o SOURCE /mnt/ssd 2>/dev/null || true)"
+device="${1:-}"
+smart_type="${2:-scsi}"
+root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
 
-if [[ -z "$device" ]]; then
-  case "$mount_source" in
-    UUID=*)
-      device="$(blkid -U "${mount_source#UUID=}" 2>/dev/null || true)"
-      ;;
-    /dev/*)
-      device="$mount_source"
-      ;;
-  esac
+if [[ -z "$device" && -n "$root_source" ]]; then
+  device="$(lsblk -sno PATH,TYPE "$root_source" 2>/dev/null | awk '$2 == "disk" { print $1; exit }')"
 fi
 
 printf '== Host ==\n'
 hostname
 date
 
-printf '\n== Mounted SSD ==\n'
-findmnt /mnt/ssd || true
+printf '\n== Raspberry Pi temperature ==\n'
+if [[ -r /sys/class/thermal/thermal_zone0/temp ]]; then
+  awk '{ printf "thermal_zone0: %.3f°C\n", $1 / 1000 }' /sys/class/thermal/thermal_zone0/temp
+else
+  echo 'thermal_zone0 is unavailable'
+fi
+if command -v vcgencmd >/dev/null 2>&1; then
+  vcgencmd measure_temp || true
+  vcgencmd get_throttled || true
+fi
+if command -v sensors >/dev/null 2>&1; then
+  sensors || true
+fi
+
+printf '\n== Root filesystem and block devices ==\n'
+findmnt /
 lsblk -o NAME,MAJ:MIN,TRAN,SIZE,FSTYPE,MODEL,SERIAL,UUID,MOUNTPOINTS
 
-if [[ -n "$device" ]]; then
-  printf '\n== blkid %s ==\n' "$device"
-  blkid "$device" || true
-fi
+printf '\n== Recent disk and USB errors ==\n'
+sudo dmesg -T | grep -Ei 'I/O error|blk_update|buffer i/o|EXT4-fs error|reset (SuperSpeed|high-speed) USB device|uas|usb-storage|sd[a-z]|scsi|rejecting I/O' | tail -120 || true
 
-printf '\n== Recent Disk/USB Errors ==\n'
-sudo dmesg -T | egrep -i 'I/O error|blk_update|buffer i/o|EXT4-fs error|reset (SuperSpeed|high-speed) USB device|uas|usb-storage|sd[a-z]|scsi|rejecting I/O' | tail -120 || true
-
+printf '\n== SMART root disk ==\n'
 if ! command -v smartctl >/dev/null 2>&1; then
-  sudo apt-get update -qq && sudo apt-get install -y smartmontools
-fi
-
-if command -v smartctl >/dev/null 2>&1 && [[ -n "$device" ]]; then
-  printf '\n== SMART %s ==\n' "$device"
-  # The USB-SATA bridges on these nodes (0930:1400) only expose real ATA SMART
-  # attributes via SAT passthrough; -d scsi returns a bare health flag with no
-  # wear/reallocation data.
-  sudo smartctl -d sat -a "$device" || sudo smartctl -d scsi -a "$device" || true
+  echo 'smartctl is unavailable; rerun 01-infra-prep.yml' >&2
+elif [[ -z "$device" ]]; then
+  echo 'Root disk could not be resolved; pass it explicitly, for example /dev/sda' >&2
 else
-  printf '\n== SMART ==\n'
-  echo "smartctl unavailable or SSD device could not be resolved"
+  printf 'Running: smartctl -d %q -a %q\n' "$smart_type" "$device"
+  sudo smartctl -d "$smart_type" -a "$device" || true
 fi
 
 if [[ -f /etc/systemd/system/k3s-agent.service ]]; then
@@ -70,11 +72,11 @@ if [[ -f /etc/systemd/system/k3s-agent.service ]]; then
   systemctl is-active k3s-agent || true
   journalctl -u k3s-agent -n 80 --no-pager || true
 elif [[ -f /etc/systemd/system/k3s.service ]]; then
-  printf '\n== k3s (server) ==\n'
+  printf '\n== k3s ==\n'
   systemctl is-active k3s || true
   journalctl -u k3s -n 80 --no-pager || true
 else
   printf '\n== k3s ==\n'
-  echo "Neither k3s nor k3s-agent service found"
+  echo 'Neither k3s nor k3s-agent service found'
 fi
 EOF

@@ -13,44 +13,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  yamllint:
-    name: YAML Lint
-    runs-on: ubuntu-24.04
+  offline-invariants:
+    name: Rebuild Invariants
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Validate verification scripts
+        run: |
+          bash -n scripts/verify-cluster.sh tests/offline/test-rebuild-invariants.sh
+          shellcheck scripts/verify-cluster.sh tests/offline/test-rebuild-invariants.sh
+          tests/offline/test-rebuild-invariants.sh
+
+  yamllint:
+    name: YAML Lint
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           python-version: "3.12"
+          enable-cache: true
 
-      - name: Install yamllint
-        run: pip install --disable-pip-version-check yamllint
+      - name: Sync lint dependencies
+        run: uv sync --locked --group dev
 
       - name: Run yamllint
-        run: yamllint -c .yamllint.yml .
+        run: uv run --no-sync --group dev yamllint -c .yamllint.yml .
 
   ansible-lint:
     name: Ansible Lint
     needs: yamllint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync lint dependencies
+        run: uv sync --locked --group dev
+
+      - name: Install Ansible collections
+        run: uv run --no-sync --group dev ansible-galaxy collection install -r requirements.yml -p ./collections
+
       - name: Run ansible-lint
-        uses: ansible/ansible-lint@v25.12.2
         env:
           # Avoid workstation vault_password_file from ansible.cfg on public CI
           ANSIBLE_CONFIG: ${{ github.workspace }}/ansible.ci.cfg
-        with:
-          setup_python: "true"
-          requirements_file: requirements.yml
+        run: uv run --no-sync --group dev ansible-lint
 
   actionlint:
     name: Action Lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,7 +93,7 @@ jobs:
 
   secrets:
     name: Secret Scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4

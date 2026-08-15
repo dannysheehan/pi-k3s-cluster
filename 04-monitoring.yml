@@ -1643,6 +1643,9 @@
         (grafana_deploy.resources[0].status.replicas | default(1))
       retries: 90
       delay: 10
+      tags: [monitoring, verification]
+
+    - name: Display monitoring stack status
       ansible.builtin.debug:
         msg: |
           ============================================================

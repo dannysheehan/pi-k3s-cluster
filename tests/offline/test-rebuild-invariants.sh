@@ -4,6 +4,11 @@
 # Ansible, kubectl, and network access so it is useful before a cluster exists.
 set -euo pipefail
 
+if ! command -v rg >/dev/null 2>&1; then
+  printf 'rg (ripgrep) is required for offline invariant checks.\n' >&2
+  exit 1
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 failures=0
 

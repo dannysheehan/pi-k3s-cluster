@@ -22,6 +22,8 @@ jobs:
 
       - name: Validate verification scripts
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep shellcheck
           bash -n scripts/verify-cluster.sh tests/offline/test-rebuild-invariants.sh
           shellcheck scripts/verify-cluster.sh tests/offline/test-rebuild-invariants.sh
           tests/offline/test-rebuild-invariants.sh

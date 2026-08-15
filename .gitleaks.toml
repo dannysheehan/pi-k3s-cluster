@@ -11,6 +11,8 @@ description = "Repo-specific false positives"
 paths = [
   '''(.*?)docs/assets/''',
   '''(.*?)dashboards/.*\.yaml$''',
+  # Offline invariant patterns mention SecretRef keys; they are not credentials.
+  '''tests/offline/.*''',
 ]
 
 regexes = [

@@ -75,6 +75,11 @@ This project deploys a production-ready Kubernetes cluster on Raspberry Pi hardw
   - Storage usage examples
 
 ### Design Documents
+- **[REBUILD-PLAN-CODEX.md](../plans/REBUILD-PLAN-CODEX.md)** - Greenfield HA rebuild plan
+  - Latest compatible platform and application version baseline
+  - Three-server K3s target architecture and revised ownership boundaries
+  - Backup, migration, cutover, rollback, and acceptance gates
+
 - **[DESIGN.md](DESIGN.md)** - Original architectural design
   - Initial requirements and goals
   - Component selection rationale
@@ -93,20 +98,22 @@ This project deploys a production-ready Kubernetes cluster on Raspberry Pi hardw
 For experienced users, the complete deployment is:
 
 ```bash
-# 1. Setup Python environment
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-ansible-galaxy install -r requirements.yml
+# 1. Install locked Python and Ansible dependencies
+uv sync --locked --all-groups
+uv run ansible-galaxy collection install -r requirements.yml -p ./collections
 
 # 2. Configure inventory
 # Edit hosts.ini with your node IPs
 
 # 3. Deploy cluster
-ansible-playbook 01-infra-prep.yml
+uv run ansible-playbook 01-infra-prep.yml
 # Wait for reboot
-ansible-playbook 02-k3s-install.yml
-ansible-playbook 03-addons.yml
+uv run ansible-playbook 02-k3s-install.yml
+uv run ansible-playbook k3s-add-master.yml --limit pi-ctl-02 --forks=1
+uv run ansible-playbook k3s-add-master.yml --limit pi-ctl-03 --forks=1
+uv run ansible-playbook 03-addons.yml
+uv run ansible-playbook 04-monitoring.yml
+uv run ansible-playbook 05-secrets.yml
 
 # 4. Verify
 export KUBECONFIG=~/.kube/config-rpi
@@ -127,8 +134,9 @@ See [DEPLOYMENT-CHECKLIST.md](DEPLOYMENT-CHECKLIST.md) for detailed verification
 1. Read [OPERATIONS.md](OPERATIONS.md) - How the live system fits together
 2. Read [CLUSTER-SETUP-SUMMARY.md](CLUSTER-SETUP-SUMMARY.md) - Current architecture
 3. Read [GITOPS.md](GITOPS.md) - Flux app delivery vs Ansible infra
-4. Review [DESIGN.md](DESIGN.md) - Original design goals
-5. Check [DESIGN-REVIEW.md](DESIGN-REVIEW.md) - Design evolution
+4. Read [REBUILD-PLAN-CODEX.md](../plans/REBUILD-PLAN-CODEX.md) - Proposed greenfield target
+5. Review [DESIGN.md](DESIGN.md) - Original design goals
+6. Check [DESIGN-REVIEW.md](DESIGN-REVIEW.md) - Design evolution
 
 ### For Troubleshooting
 1. Check [DEPLOYMENT-CHECKLIST.md](DEPLOYMENT-CHECKLIST.md) - Common issues section
@@ -150,17 +158,18 @@ All playbooks include comprehensive header comments explaining their purpose and
 - **Purpose**: Prepares hardware infrastructure
 - **What it does**:
   - Configures time synchronization
-  - Formats and mounts USB SSDs
+  - Verifies that `/` is on the intended USB SSD without formatting it
   - Sets up storage network bridge
   - Enables cgroups for Kubernetes
+  - Installs iSCSI, NFS, SMART, and Raspberry Pi health tooling
 - **Duration**: ~5 minutes + reboot time
-- **Verification**: `ansible all -a "df -h /mnt/ssd && ip addr show br-storage"`
+- **Verification**: `uv run ansible all -m shell -a 'findmnt / && ip addr show br-storage'`
 
 ### 02-k3s-install.yml
 - **Purpose**: Installs K3s on all nodes
 - **What it does**:
-  - Installs K3s control plane with embedded etcd
-  - Joins worker nodes
+  - Bootstraps the first K3s server with embedded etcd and the API VIP
+  - Joins the two agents; the other servers are added one at a time afterward
   - Disables default components (Flannel, Traefik, kube-proxy, servicelb)
   - Fetches and updates kubeconfig
 - **Duration**: ~3 minutes

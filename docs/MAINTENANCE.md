@@ -1,126 +1,62 @@
 # Maintenance
 
-Routine maintenance procedures for the Raspberry Pi K3s cluster.
+## Secrets
 
-## Secrets Management (Ansible Vault)
+Inline vault values in `group_vars/all.yml` include notification endpoints and
+Grafana's admin password. The vault password is outside the repository at
+`~/.ansible/vault-pass-pi-cluster`; back it up securely. Grafana uses the
+vaulted `grafana-admin` Secret, so there are no documented default credentials.
 
-Sensitive values in `group_vars/all.yml` are stored as inline
-`!vault`-encrypted strings (currently: `ntfy_topic`,
-`healthchecks_heartbeat_url`, `healthchecks_watchdog_url`). Set up 2026-07-05.
-The healthchecks.io API key (used only for managing checks, not by playbooks)
-lives at `~/.ansible/healthchecks-api-key` — back it up alongside the vault
-password.
+## Storage and host health
 
-**The vault password lives outside the repo** at
-`~/.ansible/vault-pass-pi-cluster` (mode 0600), wired up via
-`vault_password_file` in `ansible.cfg`, so playbook runs decrypt
-transparently — no `--ask-vault-pass` needed.
+Nodes boot directly from USB SSD root. Inspect the root filesystem and device
+health with `findmnt /`, `lsblk`, `sensors`, `smartctl`, and kernel logs. K3s data is at
+`/var/lib/rancher/k3s`; Longhorn data is at `/var/lib/longhorn` on
+`pi-ctl-03`, `pi-wrk-01`, and `pi-wrk-02`.
 
-> **Back that file up** (password manager or offline copy). If it is lost,
-> vaulted values cannot be decrypted; you would have to recreate each secret
-> and re-encrypt with a new password.
+Host preparation installs `lm-sensors` and `smartmontools`. Useful checks are:
 
 ```bash
-# View a vaulted variable (inline strings can't use `ansible-vault view`)
-ansible k3s-wrk-01 -m debug -a var=ntfy_topic
-
-# Encrypt a new secret, then paste the output into group_vars/all.yml
-ansible-vault encrypt_string 'the-secret-value' --name my_var_name
-
-# Rotate a secret: re-run encrypt_string with the new value and replace the
-# !vault block. Rotate the vault password itself with:
-ansible-vault rekey <file>   # only for whole-file vaults; for inline strings,
-                             # re-encrypt each one after changing the password file
+cat /sys/class/thermal/thermal_zone0/temp  # divide by 1000 for °C
+vcgencmd measure_temp                     # when vcgencmd is available
+sensors
+sudo smartctl -d scsi -a /dev/sda
+sudo systemctl status pi-health-metrics.timer
+cat /var/lib/node_exporter/textfile_collector/pi-health.prom
 ```
 
-Rules of thumb:
+The health timer discovers the parent disk backing `/` unless
+`pi_health_smart_device` overrides it. It defaults to `-d scsi` for the
+cluster's USB bridges. Node exporter collects the resulting temperature and
+SMART metrics; VMAlert warns at 75°C, becomes critical at 80°C, and alerts on
+failed SMART health or collection.
 
-- Never commit a plaintext secret "temporarily" — encrypt first, commit after.
-- Check with `git log -S '<value>'` if unsure whether a value ever hit history.
-- Known debt: `grafana_admin_password` is still plaintext in
-  `group_vars/all.yml` (finding D1 in the best-practices review).
+## Container runtime diagnostics
 
-## Backup etcd (Control Plane Data)
+Every K3s install and join path renders `/etc/crictl.yaml` for the bundled
+containerd socket. Confirm runtime access without repeating endpoint flags:
 
 ```bash
-# K3s automatically creates snapshots in /mnt/ssd/k3s/server/db/snapshots
-ssh ubuntu@192.168.1.41
-sudo ls -lh /mnt/ssd/k3s/server/db/snapshots/
-
-# Manual snapshot
-sudo k3s etcd-snapshot save --name manual-backup-$(date +%Y%m%d)
+uv run ansible-playbook k3s-configure-crictl.yml  # safe for an existing cluster
+sudo crictl info
+sudo crictl pods
+sudo crictl pods -q | wc -l
+sudo crictl images
 ```
 
-## Restore from etcd Snapshot
+The day-2 playbook does not install or restart K3s. Do not rerun
+`02-k3s-install.yml` merely to configure `crictl`.
+
+Retain and test etcd snapshots from
+`/var/lib/rancher/k3s/server/db/snapshots`. Confirm Longhorn replica health
+before host maintenance; volumes use two replicas.
+
+## Scheduled checks
 
 ```bash
-# Stop K3s
-sudo systemctl stop k3s
-
-# Restore snapshot
-sudo k3s server \
-  --cluster-reset \
-  --cluster-reset-restore-path=/mnt/ssd/k3s/server/db/snapshots/<snapshot-name>
-
-# Start K3s
-sudo systemctl start k3s
+./scripts/verify-cluster.sh
 ```
 
-## Monitor SD Card Health
-
-SD card writes should be minimal since `/var` and K3s data are offloaded to SSD.
-
-```bash
-ssh ubuntu@192.168.1.41
-iostat -x 1 5
-```
-
-## Check SSD Health
-
-```bash
-sudo apt install smartmontools
-lsblk -o NAME,TRAN,SIZE,FSTYPE,UUID,MODEL,SERIAL,MOUNTPOINTS
-findmnt /mnt/ssd
-sudo smartctl -a /dev/sdX
-```
-
-Notes:
-- `/dev/sdX` names are not stable on Raspberry Pi USB storage. The same SSD may
-  appear as `/dev/sda` on one boot and `/dev/sdb` on another.
-- Treat the mounted source and UUID as authoritative. Use `findmnt /mnt/ssd`,
-  `blkid`, or `/dev/disk/by-uuid/` instead of assuming `sda`.
-- If a node starts flapping, check recent transport errors before blaming
-  Longhorn:
-
-```bash
-sudo dmesg -T | egrep -i 'I/O error|blk_update|buffer i/o|EXT4-fs error|reset (SuperSpeed|high-speed) USB device|uas|usb-storage|sd[a-z]|scsi' | tail -120
-```
-
-For a repeatable host-side triage pass from the control machine:
-
-```bash
-./scripts/check-ssd-health.sh 192.168.1.45
-```
-
-## Storage Usage
-
-### Create a PersistentVolumeClaim
-
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: test-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: longhorn
-  resources:
-    requests:
-      storage: 5Gi
-```
-
-```bash
-kubectl apply -f pvc.yaml
-kubectl get pvc
-```
+Check VictoriaMetrics through `vmsingle-stable`, VictoriaLogs ingestion, and
+the alert heartbeat as part of regular operations. NFS CSI for the Synology
+DS923+ is deferred and should remain non-default when introduced.

@@ -1,0 +1,5 @@
+# GitHub-hosted ubuntu-26.04 exists, but actionlint 1.7.7's builtin label
+# list stops at ubuntu-24.04. Treat it as an allowed runner label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

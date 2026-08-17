@@ -59,6 +59,9 @@ require 'crictl uses the K3s containerd socket' '(?ms)runtime-endpoint: unix:///
 require 'Existing clusters have a safe crictl configuration playbook' '(?ms)hosts: k3s_cluster.*include_tasks: tasks/configure-crictl\.yml' k3s-configure-crictl.yml
 require 'node-exporter reads host Pi health textfiles' '(?ms)collector\.textfile\.directory=.*pi_health_textfile_directory.*extraHostVolumeMounts:.*pi-health-textfiles' 04-monitoring.yml
 require 'Pi health collection defaults to SCSI SMART' '^pi_health_smart_device_type:\s*scsi$' group_vars/all.yml
+require 'USB SSD UAS quirk uses the fleet bridge ID' '^usb_ssd_bridge_vid_pid:\s*"0930:1400"\s*$' group_vars/all.yml
+require 'USB SSD tune targets Ubuntu tryboot cmdline' '/boot/firmware/current' tasks/tune-usb-ssd.yml
+require 'Existing clusters have a safe USB SSD tune playbook' '(?ms)hosts: k3s_cluster.*include_tasks: tasks/tune-usb-ssd\.yml' k3s-tune-usb-ssd.yml
 require 'External Secrets chart is exactly pinned' '^external_secrets_version:\s*"[0-9]+\.[0-9]+\.[0-9]+"$' group_vars/all.yml
 require 'Fluent Bit floating test hook is disabled' '(?ms)name: Install Fluent Bit.*?testFramework:\s*\n\s+enabled: false' 04-monitoring.yml
 require '1Password uses the direct SDK provider' '(?ms)kind: ClusterSecretStore.*onepasswordSDK:.*serviceAccountSecretRef:' 05-secrets.yml

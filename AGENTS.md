@@ -54,7 +54,13 @@ uv run ansible-playbook k3s-add-worker.yml --limit pi-wrk-02
 uv run ansible-playbook k3s-remove-worker.yml --limit pi-wrk-02 -e wipe_data=true
 uv run ansible-playbook k3s-add-master.yml --limit pi-ctl-03 --forks=1
 uv run ansible-playbook k3s-remove-master.yml --limit pi-ctl-03
+uv run ansible-playbook k3s-tune-usb-ssd.yml --limit pi-ctl-03
 ```
+
+USB SSD UAS/autosuspend tunables live in `k3s-tune-usb-ssd.yml` (also
+included from `01-infra-prep.yml`). Drain first; reboot is required for the
+quirk to bind. Do not edit `/boot/firmware/cmdline.txt` — Ubuntu tryboot
+uses `/boot/firmware/current/cmdline.txt`.
 
 Useful targeted reruns are `03-addons.yml --tags cilium`,
 `03-addons.yml --tags multus,whereabouts`, `03-addons.yml --tags longhorn`,

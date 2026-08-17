@@ -1,0 +1,23 @@
+---
+# Safe day-2 USB SSD software tunables for existing nodes. This does not
+# install or restart K3s, update EEPROM, or reboot unless usb_ssd_reboot=true.
+#
+# Apply one node at a time. The UAS quirk is written to Ubuntu tryboot cmdline
+# files and only binds after reboot:
+#
+#   uv run ansible-playbook k3s-tune-usb-ssd.yml --limit pi-ctl-03
+#   uv run ansible-playbook k3s-tune-usb-ssd.yml --limit pi-ctl-03 -e usb_ssd_reboot=true
+
+- name: Tune USB SSD root stability
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Apply USB SSD software tunables
+      ansible.builtin.include_tasks: tasks/tune-usb-ssd.yml
+
+    - name: Reboot so the UAS quirk can bind
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        msg: Rebooting to bind usb-storage instead of UAS for the USB SSD bridge
+      when: usb_ssd_reboot | bool

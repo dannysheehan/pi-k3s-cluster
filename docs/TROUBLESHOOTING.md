@@ -16,6 +16,22 @@ the affected host's `k3s` service (or `k3s-agent` on agents). K3s data is under
 `/var/lib/rancher/k3s`. Do not repair a live cluster by rerunning the bootstrap
 playbook.
 
+## USB SSD dropouts
+
+Ping OK with SSH hanging is the USB-SSD dropout signature: the cheap
+`0930:1400` bridge left the bus and `/` is wedged on I/O. Only a physical
+power cycle recovers it. After recovery, confirm `Driver=usb-storage` and
+`UAS is ignored for this device` in dmesg. If those are missing, drain the
+node and rerun:
+
+```bash
+uv run ansible-playbook k3s-tune-usb-ssd.yml --limit <node> -e usb_ssd_reboot=true
+```
+
+Do not edit `/boot/firmware/cmdline.txt` for this; Ubuntu tryboot reads
+`/boot/firmware/current/cmdline.txt`. See
+`docs/INCIDENT-2026-08-18-CTL03-SSD-DISCONNECT.md`.
+
 ## Networking and Longhorn
 
 If pods fail secondary-network setup, first verify `br-storage`, then Multus

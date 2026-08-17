@@ -39,7 +39,12 @@ Use `--limit` and add only one server at a time:
 uv run ansible-playbook k3s-add-master.yml --limit pi-ctl-03 --forks=1
 uv run ansible-playbook k3s-add-worker.yml --limit pi-wrk-02
 uv run ansible-playbook k3s-remove-worker.yml --limit pi-wrk-02 -e wipe_data=true
+uv run ansible-playbook k3s-tune-usb-ssd.yml --limit pi-ctl-03
 ```
+
+Drain a live node before `k3s-tune-usb-ssd.yml -e usb_ssd_reboot=true`. The
+UAS quirk binds only after reboot. Apply one node at a time; on Longhorn
+storage nodes wait for volumes to return `attached/healthy` before the next.
 
 ## Observability
 

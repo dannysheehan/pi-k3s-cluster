@@ -57,6 +57,18 @@ pi_health_textfile_directory: /var/lib/node_exporter/textfile_collector
 pi_health_smart_device: ""
 pi_health_smart_device_type: scsi
 
+# USB-SATA bridge stability for USB-root nodes. The fleet's 0930:1400 bridges
+# advertise UAS and then drop off the bus (INCIDENT-2026-06-30). Ubuntu's
+# tryboot layout reads /boot/firmware/current/cmdline.txt, not the leftover
+# /boot/firmware/cmdline.txt. A reboot is required before the UAS quirk binds.
+# Day-2: uv run ansible-playbook k3s-tune-usb-ssd.yml --limit pi-ctl-03
+usb_ssd_bridge_vid_pid: "0930:1400"
+usb_ssd_disable_uas: true
+usb_ssd_disable_autosuspend: true
+usb_ssd_mask_fstrim: true
+usb_ssd_root_noatime: true
+usb_ssd_reboot: false
+
 # Secrets management. Set this non-secret identifier to the dedicated
 # 1Password vault before running 05-secrets.yml. The service-account token is
 # supplied through the playbook's private prompt and never stored here.

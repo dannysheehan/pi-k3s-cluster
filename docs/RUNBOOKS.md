@@ -39,6 +39,21 @@ Before removing a Longhorn storage node, move or recover volumes and verify
 replica health. Longhorn data is `/var/lib/longhorn`, replica count is two, and
 the permitted storage nodes are `pi-ctl-03`, `pi-wrk-01`, and `pi-wrk-02`.
 
+## USB SSD dropout after recovery
+
+After a physical power cycle, drain the node and apply the software tunables
+if `lsusb -t` still shows `Driver=uas`:
+
+```bash
+kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+uv run ansible-playbook k3s-tune-usb-ssd.yml --limit <node> -e usb_ssd_reboot=true
+kubectl uncordon <node>
+```
+
+Confirm `UAS is ignored for this device` and `Driver=usb-storage`. On Longhorn
+storage nodes wait for volumes to return `attached/healthy` before the next
+node. See `docs/INCIDENT-2026-08-18-CTL03-SSD-DISCONNECT.md`.
+
 ## Restore control-plane data
 
 Treat etcd restoration as an incident requiring a current, tested snapshot and

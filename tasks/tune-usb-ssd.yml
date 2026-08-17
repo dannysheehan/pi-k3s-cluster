@@ -1,0 +1,129 @@
+---
+# Software tunables for USB SSD root on Raspberry Pi 4. Does not touch EEPROM,
+# cables, PSUs, or enclosures. The UAS quirk is written to Ubuntu tryboot
+# cmdline files; it does not take effect until the next reboot.
+
+- name: Find Ubuntu Pi tryboot cmdline files
+  ansible.builtin.find:
+    paths:
+      - /boot/firmware/current
+      - /boot/firmware/new
+    patterns:
+      - cmdline.txt
+    file_type: file
+  register: usb_ssd_cmdline_files
+  when: not (infra_container_test_mode | default(false) | bool)
+
+- name: Prepend the USB-SATA UAS quirk on tryboot cmdline files
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^(?!.*usb-storage\.quirks={{ usb_ssd_bridge_vid_pid }}:u)(.*\S.*)$'
+    replace: 'usb-storage.quirks={{ usb_ssd_bridge_vid_pid }}:u \1'
+  loop: "{{ usb_ssd_cmdline_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when:
+    - not (infra_container_test_mode | default(false) | bool)
+    - usb_ssd_disable_uas | bool
+    - usb_ssd_cmdline_files.files | default([]) | length > 0
+
+- name: Append USB autosuspend disable on tryboot cmdline files
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^(?!.*usbcore\.autosuspend=-1)(.*\S.*)$'
+    replace: '\1 usbcore.autosuspend=-1'
+  loop: "{{ usb_ssd_cmdline_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when:
+    - not (infra_container_test_mode | default(false) | bool)
+    - usb_ssd_disable_autosuspend | bool
+    - usb_ssd_cmdline_files.files | default([]) | length > 0
+
+- name: Install udev rule to keep the USB SSD bridge awake
+  ansible.builtin.copy:
+    dest: /etc/udev/rules.d/99-usb-ssd-autosuspend.rules
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Keep the USB-SATA bridge from autosuspending. VID:PID is
+      # {{ usb_ssd_bridge_vid_pid }} (spoofed Toshiba identity on this fleet).
+      ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="{{ usb_ssd_bridge_vid_pid.split(':')[0] }}", ATTR{idProduct}=="{{ usb_ssd_bridge_vid_pid.split(':')[1] }}", TEST=="power/control", ATTR{power/control}="on", ATTR{power/autosuspend}="-1"
+  when: usb_ssd_disable_autosuspend | bool
+  register: usb_ssd_udev_rule
+
+- name: Reload udev rules after USB SSD autosuspend change
+  ansible.builtin.command: udevadm control --reload-rules
+  when:
+    - not (infra_container_test_mode | default(false) | bool)
+    - usb_ssd_disable_autosuspend | bool
+    - usb_ssd_udev_rule is changed
+  changed_when: false
+
+- name: Trigger USB udev rules for the running bridge
+  ansible.builtin.command: udevadm trigger --subsystem-match=usb --action=add
+  when:
+    - not (infra_container_test_mode | default(false) | bool)
+    - usb_ssd_disable_autosuspend | bool
+    - usb_ssd_udev_rule is changed
+  changed_when: false
+
+- name: Check whether usbcore.autosuspend is writable
+  ansible.builtin.stat:
+    path: /sys/module/usbcore/parameters/autosuspend
+  register: usbcore_autosuspend_param
+  when: usb_ssd_disable_autosuspend | bool
+
+- name: Read the running usbcore.autosuspend value
+  ansible.builtin.slurp:
+    src: /sys/module/usbcore/parameters/autosuspend
+  register: usbcore_autosuspend_value
+  when:
+    - usb_ssd_disable_autosuspend | bool
+    - usbcore_autosuspend_param.stat.exists | default(false)
+
+- name: Disable USB autosuspend on the running kernel
+  ansible.builtin.command:
+    cmd: tee /sys/module/usbcore/parameters/autosuspend
+    stdin: '-1'
+  when:
+    - usb_ssd_disable_autosuspend | bool
+    - usbcore_autosuspend_param.stat.exists | default(false)
+    - (usbcore_autosuspend_value.content | b64decode | trim) != '-1'
+  changed_when: true
+
+- name: Ensure the root ext4 fstab entry uses noatime
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(\S+)\s+/\s+ext4\s+(?!.*\bnoatime\b)(\S+)((?:\s+\d+){0,2})\s*$'
+    replace: '\1 / ext4 \2,noatime\3'
+  when: usb_ssd_root_noatime | bool
+  register: usb_ssd_fstab_noatime
+
+- name: Read current root mount options
+  ansible.builtin.command: findmnt -n -o OPTIONS /
+  register: usb_ssd_root_mount_opts
+  changed_when: false
+  when: usb_ssd_root_noatime | bool
+
+- name: Remount root with noatime
+  ansible.posix.mount:
+    path: /
+    opts: defaults,noatime
+    state: remounted
+  when:
+    - usb_ssd_root_noatime | bool
+    - "'noatime' not in (usb_ssd_root_mount_opts.stdout | split(','))"
+
+- name: Mask weekly fstrim on USB-root nodes
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    masked: true
+    enabled: false
+    state: stopped
+  loop:
+    - fstrim.timer
+    - fstrim.service
+  failed_when: false
+  when: usb_ssd_mask_fstrim | bool

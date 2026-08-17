@@ -81,3 +81,34 @@
       loop: "{{ legacy_ssd_paths.results }}"
       loop_control:
         label: "{{ item.item }}"
+
+    - name: Read fstab after USB SSD tune
+      ansible.builtin.slurp:
+        src: /etc/fstab
+      register: tuned_fstab
+
+    - name: Assert root ext4 uses noatime when an ext4 root line exists
+      ansible.builtin.assert:
+        that:
+          - "'noatime' in (tuned_fstab.content | b64decode)"
+      when: (tuned_fstab.content | b64decode) is search('(?m)^\\S+\\s+/\\s+ext4\\s+')
+
+    - name: Stat USB SSD autosuspend udev rule
+      ansible.builtin.stat:
+        path: /etc/udev/rules.d/99-usb-ssd-autosuspend.rules
+      register: usb_ssd_udev_rule
+
+    - name: Assert USB SSD autosuspend udev rule was rendered
+      ansible.builtin.assert:
+        that:
+          - usb_ssd_udev_rule.stat.exists
+          - usb_ssd_udev_rule.stat.mode == '0644'
+
+    - name: Assert fstrim units are masked when systemd exposes them
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item].status == 'masked'
+      loop:
+        - fstrim.timer
+        - fstrim.service
+      when: item in ansible_facts.services

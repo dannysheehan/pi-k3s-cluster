@@ -27,6 +27,7 @@ This project deploys a production-ready Kubernetes cluster on Raspberry Pi hardw
   - Recommended additional components with Pi-sized footprints
 - **[INCIDENT-2026-06-04-GRAFANA-DASHBOARDS.md](INCIDENT-2026-06-04-GRAFANA-DASHBOARDS.md)** - VictoriaMetrics storage corruption incident
 - **[INCIDENT-2026-06-30-WRK01-SSD-DISCONNECT.md](INCIDENT-2026-06-30-WRK01-SSD-DISCONNECT.md)** - USB SSD disconnect and 4.5-day node outage
+- **[INCIDENT-2026-08-18-CTL03-SSD-DISCONNECT.md](INCIDENT-2026-08-18-CTL03-SSD-DISCONNECT.md)** - pi-ctl-03 USB SSD disconnect recurrence and UAS quirk rollout
 
 ### Reference Documents
 - **[CLUSTER-SETUP-SUMMARY.md](CLUSTER-SETUP-SUMMARY.md)** - Final configuration reference

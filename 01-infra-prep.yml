@@ -15,6 +15,7 @@
 #   - Storage network: br-storage bridge on the dedicated USB Ethernet NIC
 #   - Headless-node hygiene: mask snapd/ModemManager/bluetooth/avahi, bound
 #     journald, disable unattended-upgrades automatic reboot
+#   - USB SSD stability: UAS quirk + autosuspend disable, root noatime, mask fstrim
 #
 # Design assumptions:
 #   - OS is installed directly to the USB SSD during imaging; this playbook does
@@ -329,6 +330,9 @@
         - avahi-daemon.service
         - avahi-daemon.socket
       failed_when: false
+
+    - name: Tune USB SSD root for cheap UAS bridges
+      ansible.builtin.include_tasks: tasks/tune-usb-ssd.yml
 
     - name: Ensure systemd-journald drop-in directory exists
       ansible.builtin.file:

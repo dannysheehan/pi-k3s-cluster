@@ -216,6 +216,11 @@ first (hardware is the more likely culprit), and only reach for the quirk if
 UAS error signatures (`uas_eh_abort_handler`, repeated `reset SuperSpeed`)
 actually appear in the shipped kernel logs.
 
+**Update 2026-08-18:** disconnects recurred on `pi-ctl-03`. The UAS quirk
+and autosuspend disable are now applied fleet-wide; see
+`docs/INCIDENT-2026-08-18-CTL03-SSD-DISCONNECT.md` and
+`k3s-tune-usb-ssd.yml`. Enclosure replacement remains open.
+
 ### 6. Schedule SMART / SSD Health Checks
 
 Run `./scripts/check-ssd-health.sh` on a schedule (cron or smartd) to catch

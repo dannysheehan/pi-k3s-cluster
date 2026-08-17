@@ -436,6 +436,17 @@
             enabled: true
             storageClassName: "{{ storage_class }}"
             size: "{{ vmagent_queue_size }}"
+          # Kubelet and cAdvisor are scraped via the apiserver proxy path
+          # (/api/v1/nodes/<node>/proxy/metrics...), which needs nodes/proxy.
+          # The chart default ClusterRole only grants nodes and nodes/metrics,
+          # so without this the kubelet/cAdvisor scrape is 403 Forbidden and
+          # every per-namespace/per-pod CPU+memory panel on the cluster
+          # dashboards is empty.
+          rbac:
+            extraRules:
+              - apiGroups: [""]
+                resources: ["nodes/proxy"]
+                verbs: ["get"]
           # Remote write configuration - required by the chart
           remoteWrite:
             - url: "http://vmsingle-stable.monitoring.svc:8428/api/v1/write"
@@ -577,6 +588,39 @@
                   - source_labels: [__meta_kubernetes_pod_ip]
                     target_label: __address__
                     replacement: ${1}:9962
+                  - source_labels: [__meta_kubernetes_pod_name]
+                    target_label: pod
+                  - source_labels: [__meta_kubernetes_pod_node_name]
+                    target_label: node
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+
+              # Cilium Operator metrics (port 9963)
+              # A separate deployment from the agent. Scrape its own prometheus
+              # container port directly; without this the operator is never
+              # scraped and operator-level dashboards are empty.
+              - job_name: cilium-operator
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names:
+                        - kube-system
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_io_cilium_app]
+                    regex: operator
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_container_name]
+                    regex: cilium-operator
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_container_port_name]
+                    regex: prometheus
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_phase]
+                    regex: Running
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_ip]
+                    target_label: __address__
+                    replacement: ${1}:9963
                   - source_labels: [__meta_kubernetes_pod_name]
                     target_label: pod
                   - source_labels: [__meta_kubernetes_pod_node_name]
@@ -1289,7 +1333,10 @@
               # not listen on :3000 until that finishes. 200m on a Pi throttles
               # first boot past the startup probe (connection refused, empty logs).
               cpu: "1"
-              memory: 512Mi
+              # Grafana sits near 512Mi during normal use; near the ceiling the
+              # Go GC pauses /api/health past its timeout and kubelet restarts
+              # the pod. Give it headroom (1Gi) to stop the flap.
+              memory: 1Gi
           # Grafana can take a few seconds to answer /api/health on this
           # cluster, especially after plugin load or while SQLite is busy.
           # The chart default readiness timeout (1s) is too aggressive and
@@ -1406,11 +1453,6 @@
               traefik:
                 gnetId: 17346
                 revision: 9
-                datasource: VictoriaMetrics
-              # Hubble
-              hubble:
-                gnetId: 16612
-                revision: 1
                 datasource: VictoriaMetrics
           # Use one provisioning model. Mount the two repository-owned
           # ConfigMaps into the inline file providers instead of enabling the
@@ -1677,7 +1719,6 @@
             - Longhorn (ID: 16888)
             - Traefik (ID: 17346)
             - Cilium Agent (ID: 16611)
-            - Hubble (ID: 16612)
 
           Storage:
             - Victoria Metrics: {{ vm_storage_size }} ({{ vm_retention }} retention)

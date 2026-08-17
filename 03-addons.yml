@@ -808,6 +808,14 @@
           # Use Cilium L2 announcements for LoadBalancer
           service:
             type: LoadBalancer
+          # Expose the metrics entryPoint (9100) on the Service so vmagent can
+          # scrape it. The chart keeps expose.default false by default, which
+          # leaves Traefik metrics undiscoverable (no "metrics" port on the
+          # service) and the traefik-official dashboards empty.
+          ports:
+            metrics:
+              expose:
+                default: true
           # Enable BOTH Ingress and Gateway API providers
           providers:
             kubernetesIngress:

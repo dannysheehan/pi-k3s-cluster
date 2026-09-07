@@ -35,7 +35,9 @@ uv run ansible-playbook 05-secrets.yml
 ```
 
 On the first run, paste the 1Password service-account token into the private
-prompt. Ansible writes it directly to the `onepassword-service-account`
+prompt. This is the long value beginning with `ops_`, not the 26-character
+vault ID. The playbook rejects an invalid token format before installing or
+waiting on any resources. Ansible writes it directly to the `onepassword-service-account`
 Kubernetes Secret with `no_log`; the value is not written to this repository.
 On later runs, leave the prompt blank to retain the existing Secret. Entering
 a value deliberately rotates it.
@@ -87,6 +89,11 @@ kubectl get clustersecretstore onepassword
 kubectl get externalsecrets -A
 kubectl describe externalsecret -n <namespace> <name>
 ```
+
+The permanent `external-secrets/onepassword-canary` ExternalSecret is managed
+by Flux from `home-gitops`. It reads a randomly generated, non-production
+`external-secrets-canary/password` item and proves the full provider path. Its
+target Secret must contain only the `value` key; routine checks never reveal it.
 
 Never print or decode target Secrets during routine verification. If the store
 is not Ready, check controller events, outbound DNS/HTTPS access to 1Password,

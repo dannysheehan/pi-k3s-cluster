@@ -250,7 +250,7 @@ check_vmagent_queue() {
 }
 
 check_external_secrets() {
-  local ready
+  local ready canary_ready
   if ! kubectl_rpi get clustersecretstore onepassword >/dev/null 2>&1; then
     record_failure "1Password ClusterSecretStore is missing."
     return
@@ -261,6 +261,23 @@ check_external_secrets() {
     record_ok "1Password ClusterSecretStore is Ready."
   else
     record_failure "1Password ClusterSecretStore is not Ready (status=${ready:-missing})."
+  fi
+
+  if ! kubectl_rpi get externalsecret -n external-secrets onepassword-canary >/dev/null 2>&1; then
+    record_failure "1Password retrieval canary ExternalSecret is missing."
+    return
+  fi
+  canary_ready="$(kubectl_rpi get externalsecret -n external-secrets onepassword-canary \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+  if [[ "$canary_ready" != True ]]; then
+    record_failure "1Password retrieval canary is not Ready (status=${canary_ready:-missing})."
+    return
+  fi
+  if kubectl_rpi get secret -n external-secrets onepassword-canary -o json 2>/dev/null \
+    | jq -e '(.data | keys) == ["value"]' >/dev/null; then
+    record_ok "1Password retrieval canary is Ready with the expected target key."
+  else
+    record_failure "1Password retrieval canary target Secret is missing or has unexpected keys."
   fi
 }
 

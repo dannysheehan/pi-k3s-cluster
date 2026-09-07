@@ -73,7 +73,7 @@ usb_ssd_reboot: false
 # 1Password vault before running 05-secrets.yml. The service-account token is
 # supplied through the playbook's private prompt and never stored here.
 external_secrets_version: "2.9.0"
-onepassword_vault_id: ""
+onepassword_vault_id: "zt4gb7h3bjfm6zanr7ueym5n4y" # gitleaks:allow
 
 # Flux bootstrap. The generated manifests remain canonical in home-gitops;
 # these checksums make the initial controller/sync installation reproducible

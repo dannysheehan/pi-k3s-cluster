@@ -65,6 +65,7 @@ require 'Existing clusters have a safe USB SSD tune playbook' '(?ms)hosts: k3s_c
 require 'External Secrets chart is exactly pinned' '^external_secrets_version:\s*"[0-9]+\.[0-9]+\.[0-9]+"$' group_vars/all.yml
 require 'Fluent Bit floating test hook is disabled' '(?ms)name: Install Fluent Bit.*?testFramework:\s*\n\s+enabled: false' 04-monitoring.yml
 require '1Password uses the direct SDK provider' '(?ms)kind: ClusterSecretStore.*onepasswordSDK:.*serviceAccountSecretRef:' 05-secrets.yml
+require '1Password token format is validated before use' "match\\('\^ops_'\\)" 05-secrets.yml
 forbid '1Password bootstrap token is not stored in group vars' 'onepassword_(service_account_)?token:' group_vars/all.yml
 require 'Flux version is exactly pinned' '^flux_version:\s*"v[0-9]+\.[0-9]+\.[0-9]+"$' group_vars/all.yml
 require 'Flux canonical source is the NAS' '^home_gitops_repository_url:.*\n\s+http://nas\.home\.ftmon\.org:3000/dsheehan/home-gitops\.git$' group_vars/all.yml
@@ -74,6 +75,7 @@ require 'Flux bootstrap rejects authenticated Git source' "'secretRef:' not in f
 require 'Flux bootstrap waits for source readiness' 'name: Wait for canonical Git source readiness' 06-flux.yml
 require 'Flux exposes a source-only preflight tag' 'tags: \[flux, gitops, preflight\]' 06-flux.yml
 require 'Live verification checks canonical Flux source' 'Flux Git source is Ready from the canonical NAS repository' scripts/verify-cluster.sh
+require 'Live verification checks 1Password retrieval canary' '1Password retrieval canary is Ready with the expected target key' scripts/verify-cluster.sh
 
 if (( failures )); then
   printf '\nOffline rebuild invariant checks failed: %d.\n' "$failures" >&2

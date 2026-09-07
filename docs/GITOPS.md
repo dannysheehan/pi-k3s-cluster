@@ -19,7 +19,24 @@ HTTPS for Flux when trusted TLS is available; plain HTTP provides no transport
 integrity. See [Synology DS923+ follow-up setup](SYNOLOGY.md) for recovery
 tests and the deferred NFS RWX plan.
 
-Flux reconciles applications and UI routing from that remote.
+Flux reconciles applications and UI routing from that remote. After the
+platform and External Secrets baseline is ready, install it with:
+
+```bash
+uv run ansible-playbook 06-flux.yml
+```
+
+The playbook downloads `gotk-components.yaml` and `gotk-sync.yaml` from NAS
+`main`, verifies their repository checksums and source ownership, installs the
+controllers, and waits for the source and root reconciliation. It deliberately
+does not run `flux bootstrap` or grant Flux a Git write credential.
+
+The source-only gate can be exercised without touching Kubernetes:
+
+```bash
+uv run ansible-playbook 06-flux.yml --tags preflight
+```
+
 Keep cluster bootstrap and frozen versions in `group_vars/all.yml` separate from
 post-baseline application configuration.
 

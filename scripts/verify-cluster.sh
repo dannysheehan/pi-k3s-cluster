@@ -264,6 +264,37 @@ check_external_secrets() {
   fi
 }
 
+check_flux() {
+  local source_json source_url source_ready root_ready controller
+  if ! source_json="$(kubectl_rpi get gitrepository -n flux-system flux-system -o json 2>/dev/null)"; then
+    record_failure "Flux GitRepository flux-system/flux-system is missing."
+    return
+  fi
+  source_url="$(printf '%s' "$source_json" | jq -r '.spec.url // ""')"
+  source_ready="$(printf '%s' "$source_json" | jq -r '.status.conditions[]? | select(.type == "Ready") | .status')"
+  if [[ "$source_url" == "http://nas.home.ftmon.org:3000/dsheehan/home-gitops.git" && "$source_ready" == True ]]; then
+    record_ok "Flux Git source is Ready from the canonical NAS repository."
+  else
+    record_failure "Flux source URL/status is '${source_url:-missing}'/'${source_ready:-missing}'."
+  fi
+
+  root_ready="$(kubectl_rpi get kustomization -n flux-system flux-system \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+  if [[ "$root_ready" == True ]]; then
+    record_ok "Flux root Kustomization is Ready."
+  else
+    record_failure "Flux root Kustomization is not Ready (status=${root_ready:-missing})."
+  fi
+
+  for controller in source-controller kustomize-controller helm-controller notification-controller; do
+    if kubectl_rpi rollout status -n flux-system "deployment/${controller}" --timeout=1s >/dev/null 2>&1; then
+      record_ok "Flux controller ${controller} is available."
+    else
+      record_failure "Flux controller ${controller} is not available."
+    fi
+  done
+}
+
 run_section "Nodes" kubectl_rpi get nodes -o wide
 run_section "Pods" kubectl_rpi get pods -A
 run_section "Services" kubectl_rpi get svc -A
@@ -280,6 +311,7 @@ run_section "Filesystem Device Errors" check_filesystem_device_errors
 run_section "Raspberry Pi And Root SSD Health" check_pi_health_metrics
 run_section "VMAgent Queue Health" check_vmagent_queue
 run_section "External Secrets And 1Password" check_external_secrets
+run_section "Flux NAS Reconciliation" check_flux
 run_section "Recent Events" kubectl_rpi get events -A --sort-by=.lastTimestamp
 
 if [[ "$failures" -gt 0 ]]; then

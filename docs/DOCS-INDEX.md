@@ -115,6 +115,7 @@ uv run ansible-playbook k3s-add-master.yml --limit pi-ctl-03 --forks=1
 uv run ansible-playbook 03-addons.yml
 uv run ansible-playbook 04-monitoring.yml
 uv run ansible-playbook 05-secrets.yml
+uv run ansible-playbook 06-flux.yml
 
 # 4. Verify
 export KUBECONFIG=~/.kube/config-rpi
@@ -197,6 +198,14 @@ All playbooks include comprehensive header comments explaining their purpose and
   - Installs VMAgent
   - Installs Grafana and the `/grafana` route
 - **Useful tags**: `vmsingle`, `vmagent`, `grafana`, `node_exporter`, `traefik_metrics`
+
+### 06-flux.yml
+- **Purpose**: Installs Flux from the checksum-pinned NAS manifests
+- **What it does**:
+  - Verifies the public NAS source and frozen manifest checksums
+  - Installs the Flux controllers and CRDs without a Git write credential
+  - Applies the canonical GitRepository and waits for root reconciliation
+- **Useful tags**: `flux`, `gitops`
 
 ## 🧪 Test Files
 

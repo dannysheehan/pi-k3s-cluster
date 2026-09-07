@@ -16,6 +16,7 @@ uv run ansible-playbook k3s-add-master.yml --limit pi-ctl-03 --forks=1
 uv run ansible-playbook 03-addons.yml
 uv run ansible-playbook 04-monitoring.yml
 uv run ansible-playbook 05-secrets.yml
+uv run ansible-playbook 06-flux.yml
 ./scripts/verify-cluster.sh
 ```
 

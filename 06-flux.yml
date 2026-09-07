@@ -1,0 +1,146 @@
+---
+# Bootstrap Flux from the canonical, public-read home-gitops repository on the
+# Synology NAS. This does not run `flux bootstrap`, need a Git write credential,
+# or regenerate the committed manifests.
+
+- name: Install Flux and reconcile home-gitops from the NAS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    kubeconfig: ~/.kube/config-rpi
+    flux_controllers:
+      - source-controller
+      - kustomize-controller
+      - helm-controller
+      - notification-controller
+  tasks:
+    - name: Download canonical Flux controller manifest
+      ansible.builtin.uri:
+        url: "{{ home_gitops_flux_manifest_base_url }}/gotk-components.yaml"
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: flux_components_manifest
+      changed_when: false
+      tags: [flux, gitops, preflight]
+
+    - name: Download canonical Flux sync manifest
+      ansible.builtin.uri:
+        url: "{{ home_gitops_flux_manifest_base_url }}/gotk-sync.yaml"
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: flux_sync_manifest
+      changed_when: false
+      tags: [flux, gitops, preflight]
+
+    - name: Verify frozen Flux bootstrap manifests
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('sha256:' ~ (flux_components_manifest.content | hash('sha256'))) ==
+            flux_components_manifest_checksum
+          - >-
+            ('sha256:' ~ (flux_sync_manifest.content | hash('sha256'))) ==
+            flux_sync_manifest_checksum
+          - >-
+            ('app.kubernetes.io/version: ' ~ flux_version) in
+            flux_components_manifest.content
+          - "('url: ' ~ home_gitops_repository_url) in flux_sync_manifest.content"
+          - "('branch: ' ~ home_gitops_branch) in flux_sync_manifest.content"
+          - "('path: ' ~ home_gitops_cluster_path) in flux_sync_manifest.content"
+          - "'secretRef:' not in flux_sync_manifest.content"
+        fail_msg: >-
+          Refusing Flux bootstrap: NAS main does not contain the reviewed,
+          checksum-pinned public source manifests. Merge the reviewed
+          home-gitops source branch or update the pins after inspecting the
+          exact manifest diff.
+      tags: [flux, gitops, preflight]
+
+    - name: Install frozen Flux controllers and CRDs
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ flux_components_manifest.content }}"
+      tags: [flux, gitops]
+
+    - name: Wait for Flux controller deployments
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: flux-system
+        name: "{{ item }}"
+      loop: "{{ flux_controllers }}"
+      loop_control:
+        label: "{{ item }}"
+      register: flux_controller
+      until: >-
+        flux_controller.resources | length == 1 and
+        (flux_controller.resources[0].status.availableReplicas | default(0)) ==
+        (flux_controller.resources[0].spec.replicas | default(1))
+      retries: 30
+      delay: 10
+      tags: [flux, gitops]
+
+    - name: Apply canonical Flux source and root reconciliation
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ flux_sync_manifest.content }}"
+      tags: [flux, gitops]
+
+    - name: Wait for canonical Git source readiness
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: source.toolkit.fluxcd.io/v1
+        kind: GitRepository
+        namespace: flux-system
+        name: flux-system
+      register: flux_git_source
+      until: >-
+        flux_git_source.resources | length == 1 and
+        (flux_git_source.resources[0].status.conditions | default([])
+        | selectattr('type', 'equalto', 'Ready')
+        | selectattr('status', 'equalto', 'True') | list | length) == 1
+      retries: 30
+      delay: 10
+      tags: [flux, gitops]
+
+    - name: Verify running Flux source ownership
+      ansible.builtin.assert:
+        that:
+          - flux_git_source.resources[0].spec.url == home_gitops_repository_url
+          - flux_git_source.resources[0].spec.ref.branch == home_gitops_branch
+          - flux_git_source.resources[0].spec.secretRef is not defined
+        fail_msg: >-
+          The running Flux source is not the expected public-read NAS
+          repository. Stop before reconciling applications.
+      tags: [flux, gitops]
+
+    - name: Wait for root Flux reconciliation
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+        namespace: flux-system
+        name: flux-system
+      register: flux_root_kustomization
+      until: >-
+        flux_root_kustomization.resources | length == 1 and
+        (flux_root_kustomization.resources[0].status.conditions | default([])
+        | selectattr('type', 'equalto', 'Ready')
+        | selectattr('status', 'equalto', 'True') | list | length) == 1
+      retries: 60
+      delay: 10
+      tags: [flux, gitops]
+
+    - name: Report reconciled NAS revision
+      ansible.builtin.debug:
+        msg: >-
+          Flux source is Ready from {{ home_gitops_repository_url }} at
+          {{ flux_git_source.resources[0].status.artifact.revision |
+          default('revision unavailable') }}.
+      tags: [flux, gitops]

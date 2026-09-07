@@ -27,6 +27,10 @@
   `onepassword_vault_id`, and run `05-secrets.yml` from a trusted terminal.
 - [ ] Confirm the `onepassword` ClusterSecretStore reports Ready without
   printing or decoding any Secret.
+- [ ] Confirm NAS `home-gitops` `main` contains the reviewed public Flux source
+  manifest, then run `06-flux.yml`.
+- [ ] Confirm the `flux-system` GitRepository and root Kustomization are Ready
+  from `http://nas.home.ftmon.org:3000/dsheehan/home-gitops.git`.
 - [ ] Run `./scripts/verify-cluster.sh`.
 
 ## Baseline acceptance

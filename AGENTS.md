@@ -43,7 +43,8 @@ Run `01-infra-prep.yml`, then `02-k3s-install.yml`. Join `pi-ctl-02` and
 `pi-ctl-03` separately with `k3s-add-master.yml --limit <node> --forks=1`,
 verifying etcd after each join. Then run `03-addons.yml` and
 `04-monitoring.yml`, then `05-secrets.yml` once its 1Password inputs are
-prepared. Nodes are expected to be `NotReady` after K3s bootstrap
+prepared. Finally run `06-flux.yml` to install Flux from the checksum-pinned
+public NAS manifests. Nodes are expected to be `NotReady` after K3s bootstrap
 until Cilium is installed.
 
 Never rerun `02-k3s-install.yml` against a live cluster. For day-2 membership

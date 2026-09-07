@@ -1,120 +1,73 @@
 # Synology DS923+ follow-up setup
 
-This guide is post-baseline work. It describes two independent future services
-on the DS923+: an off-cluster Git source for Flux, and an explicitly selected
-NFS `ReadWriteMany` (RWX) storage path. Neither is part of the initial K3s
-deployment. Do not run any of these steps until the clean-slate baseline is
-accepted.
+This guide covers two independent DS923+ services: the active off-cluster Git
+source for Flux, and a future explicitly selected NFS `ReadWriteMany` (RWX)
+storage path. The Git source is part of rebuild recovery; NFS remains deferred
+until the clean-slate baseline is accepted.
 
 Before starting, the operator must provide and record the following values;
 they are deliberately not guessed here:
 
 | Input | Placeholder |
 | --- | --- |
-| NAS LAN IP or DNS name | `<nas-host>` |
-| SSH port | `<nas-ssh-port>` |
+| NAS DNS name | `nas.home.ftmon.org` |
+| Forgejo HTTP / SSH ports | `3000` / `2222` |
 | DSM volume and shared-folder name | `<volume>` / `<shared-folder>` |
-| Git bare-repository path | `<git-repo-path>` |
-| Dedicated Git account name | `<git-account>` |
-| Git repository name | `<repo-name>.git` |
-| Git default branch and Flux path | `<branch>` / `<cluster-manifest-path>` |
+| Git repository | `dsheehan/home-gitops` |
+| Maintainer Forgejo account | `dsheehan` (selected by the workstation SSH key) |
+| Git default branch and Flux path | `main` / `./clusters/rpi` |
 | NFS export path and allowed client CIDR | `<nfs-export-path>` / `<client-cidr>` |
 | NFS workload UID/GID and squash policy | `<uid>` / `<gid>` / `<squash-policy>` |
 
-Keep the NAS LAN-only. Restrict DSM administration, SSH, and NFS in the DSM
-firewall to the management workstation and the required cluster/client CIDRs;
-do not publish any of these services to the Internet. Confirm the exact DSM
-screens and package behaviour against Synology's [Git Server documentation](https://kb.synology.com/en-global/DSM/help/Git/git?version=6) and [NFS permissions documentation](https://kb.synology.com/en-us/PAS/help/PAS/AdminCenter/file_share_privilege_nfs?version=1_0).
+The Git repository is intentionally publicly readable so a new Flux controller
+can clone it without a bootstrap credential. Writes still require SSH key
+authentication. Restrict DSM administration, NFS, and unrelated NAS services
+at the firewall; expose only the intended Forgejo endpoints. Plain HTTP does
+not protect repository traffic from alteration in transit, so trusted HTTPS is
+a follow-up requirement when certificates are available.
 
-## A. Preferred canonical Git remote for Flux
+## A. Canonical Git remote for Flux
 
-The preferred canonical remote for `home-gitops` is a private bare repository
-on the DS923+ using Synology's Git Server package. It is off-cluster, so Flux
-can recover application configuration while the in-cluster Forgejo instance is
-unavailable. Forgejo may be a fresh mirror, but must not become the canonical
-copy.
-
-### DSM and account setup
-
-1. Install and enable the DSM Git Server package. Enable SSH only if it is
-   required for Git access, on `<nas-ssh-port>`.
-2. Create the dedicated, non-administrator `<git-account>`. Do not use a DSM
-   administrator or `root` for Git access. Restrict the account to the one
-   Git shared folder and configure its shell/access as `git-shell` where the
-   DSM/package setup supports it; it must not provide an interactive admin
-   shell.
-3. Create a dedicated shared folder on `<volume>` for the Git repositories.
-   Grant only `<git-account>` the necessary access. Create the bare repository
-   owned by that account, without `sudo` or `root`, for example at
-   `<git-repo-path>/<repo-name>.git`. Do not expose a writable working tree as
-   the canonical remote.
-4. Verify that an SSH login using the Git account is limited to Git operations
-   and that an ordinary shell or DSM administration is refused.
-
-Use separate keys and do not reuse a personal workstation key for Flux:
-
-- Add a **read-only Flux deploy key** to `<git-account>`/the repository. It
-  must be able to clone and fetch only; it must not push.
-- Add a distinct **workstation write key** for maintainers who push reviewed
-  changes. Keep its private material only on approved workstations.
-- Record and pin the NAS SSH host key fingerprint before configuring Flux.
-  Place the verified `<nas-host>:<nas-ssh-port>` host key in Flux's known-hosts
-  configuration rather than accepting a key interactively or disabling host
-  checking. Re-verify the fingerprint through an independent local channel
-  before any planned NAS replacement or host-key rotation.
-
-An example remote URL, with values intentionally left as placeholders, is:
+The canonical `home-gitops` repository is Forgejo on the DS923+. It is outside
+the K3s cluster, so Flux can recover application configuration while the
+in-cluster Forgejo application and all cluster PVCs are unavailable.
 
 ```text
-ssh://<git-account>@<nas-host>:<nas-ssh-port>/<git-repo-path>/<repo-name>.git
+Web:        http://nas.home.ftmon.org:3000/dsheehan/home-gitops
+Flux read:  http://nas.home.ftmon.org:3000/dsheehan/home-gitops.git
+Git push:   ssh://git@nas.home.ftmon.org:2222/dsheehan/home-gitops.git
 ```
 
-From a workstation using the write key, initialise the bare remote and make
-the first push only after checking the remote path and ownership:
+The local `home-gitops` checkout uses the SSH URL as `origin`. Its key is
+mapped by Forgejo to user `dsheehan`; Forgejo correctly refuses interactive
+shell access. Anonymous HTTP `ls-remote`, SSH fetch, and a no-op SSH push
+dry-run were verified on 2026-09-07 at commit `c4bb55a`.
+
+Flux's `GitRepository/flux-system` uses the public HTTP URL without a
+`secretRef`. This deliberately removes secret provisioning from initial Flux
+recovery. The repository must remain public for that configuration to work.
+If it becomes private, switch Flux to a dedicated read-only deploy key and pin
+the NAS SSH host key; never give the controller a maintainer write key.
+
+For a clean bootstrap, install the Flux controllers at the version committed
+under `clusters/rpi/flux-system`, then apply `gotk-sync.yaml`. The source must
+become Ready before any in-cluster Forgejo resources are required:
 
 ```bash
-git remote add synology 'ssh://<git-account>@<nas-host>:<nas-ssh-port>/<git-repo-path>/<repo-name>.git'
-git push synology <initial-branch>
+kubectl apply -f clusters/rpi/flux-system/gotk-components.yaml
+kubectl apply -f clusters/rpi/flux-system/gotk-sync.yaml
+flux reconcile source git flux-system --with-source
+flux reconcile kustomization flux-system --with-source
 ```
-
-Use the actual repository and branch names in place of the placeholders. The
-commands do not create accounts, keys, or secrets; provision those through the
-approved DSM and secret-management process.
-
-### Flux bootstrap and normal reconciliation
-
-First create the Flux SSH Secret from the read-only deploy key and the
-verified known-hosts entry using the current Flux documentation and the chosen
-secret-management process. Do not put private keys, known-hosts material, or
-passwords in this repository. Then bootstrap or configure Flux conceptually
-with the SSH remote, branch, and manifest path:
-
-```bash
-flux bootstrap git \
-  --url='ssh://<git-account>@<nas-host>:<nas-ssh-port>/<git-repo-path>/<repo-name>.git' \
-  --branch='<branch>' \
-  --path='<cluster-manifest-path>'
-
-flux reconcile source git <gitrepository-name> --with-source
-flux reconcile kustomization <kustomization-name> --with-source
-```
-
-Select the exact bootstrap command and flags after confirming the installed
-Flux version and how it consumes the read-only deploy key. Bootstrap often
-writes Flux manifests to the remote; if it needs write access, perform that
-one-time repository initialisation with a controlled workstation credential,
-then configure ongoing Flux reconciliation with the read-only key. Never
-silently give the running controller a write key merely to make bootstrap
-convenient.
 
 ### Recovery, availability, and backup tests
 
 Before depending on this service, prove all of the following:
 
-- A new workstation can clone with the write key after independently verifying
-  the pinned SSH host key; Flux can fetch with only its read-only key.
+- A new workstation can clone anonymously over the Flux URL and fetch/push
+  with the maintainer SSH key after verifying the SSH host key.
 - Push a harmless committed change, reconcile it, and confirm that Flux uses
-  the expected revision. Confirm that the Flux key cannot push.
+  the expected revision without a Kubernetes Git credential Secret.
 - Recover a clean Flux controller/cluster from the NAS remote and reconcile
   the intended manifests without relying on Forgejo.
 - Take a DSM snapshot of the Git shared folder and restore a test clone from

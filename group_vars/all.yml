@@ -75,6 +75,21 @@ usb_ssd_reboot: false
 external_secrets_version: "2.9.0"
 onepassword_vault_id: ""
 
+# Flux bootstrap. The generated manifests remain canonical in home-gitops;
+# these checksums make the initial controller/sync installation reproducible
+# and force an explicit review when those bootstrap manifests change.
+flux_version: "v2.9.3"
+home_gitops_repository_url: >-
+  http://nas.home.ftmon.org:3000/dsheehan/home-gitops.git
+home_gitops_branch: main
+home_gitops_cluster_path: ./clusters/rpi
+home_gitops_flux_manifest_base_url: >-
+  http://nas.home.ftmon.org:3000/dsheehan/home-gitops/raw/branch/main/clusters/rpi/flux-system
+flux_components_manifest_checksum: >-
+  sha256:c6e84495c3b611978d053adc40aca1e2a12af38f6e239c44a6b6c1224e01cab7
+flux_sync_manifest_checksum: >-
+  sha256:2dc61cf159f936756552ca2714656b6b757c2c618c1281bb4cfc10c16616e760
+
 # Monitoring stack
 victoria_metrics_version: "0.44.0"
 vmalert_chart_version: "0.46.0"

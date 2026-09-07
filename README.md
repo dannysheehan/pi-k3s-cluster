@@ -64,10 +64,11 @@ the server, export, and credentials remain TBD.
 
 ## GitOps
 
-The preferred canonical Git remote is a private SSH bare repository on the
-Synology DS923+, with a tested off-NAS mirror; its address and account details
-remain operator inputs. Applications and UI routing may later be reconciled by
-Flux from it. An in-cluster Git service is not canonical. See `docs/GITOPS.md`.
+The canonical `home-gitops` remote is the off-cluster Forgejo repository on the
+Synology DS923+ at `nas.home.ftmon.org`. Maintainers push over SSH port 2222;
+Flux reads the public repository over HTTP port 3000. An in-cluster Git service
+is not canonical. Add trusted HTTPS and a tested off-NAS mirror as follow-up
+hardening; see `docs/GITOPS.md`.
 
 ## Documentation
 

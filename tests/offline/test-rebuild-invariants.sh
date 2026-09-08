@@ -54,6 +54,7 @@ require 'Grafana metrics datasource UID is stable' 'uid:\s*VictoriaMetrics' 04-m
 require 'Raspberry Pi health dashboard uses collected metrics' '(?ms)pi_cpu_temperature_celsius.*pi_root_disk_smart_healthy.*pi_health_metrics_scrape_success' dashboards/pi-health-configmap.yaml
 require 'Grafana VictoriaLogs plugin is version-pinned' 'victoriametrics-logs-datasource@[0-9]+\.[0-9]+\.[0-9]+' 04-monitoring.yml
 require 'VictoriaMetrics stable Service is declared and used' '(?ms)name: vmsingle-stable.*remoteWrite:.*vmsingle-stable\.monitoring\.svc' 04-monitoring.yml
+require 'VictoriaMetrics has measured recovery headroom' '(?ms)name: Install Victoria Metrics Single.*?resources:\s*\n\s+requests:\s*\n\s+cpu: 250m\s*\n\s+memory: 512Mi\s*\n\s+limits:.*?cpu: "1"\s*\n\s+memory: 1Gi' 04-monitoring.yml
 require 'Each monitoring repo task has a matching repo-update tag set' 'tags: \[monitoring, repositories, vmsingle, victorialogs, vmagent, vmalert, node_exporter, kube-state-metrics, grafana, fluent-bit\]' 04-monitoring.yml
 require 'crictl uses the K3s containerd socket' '(?ms)runtime-endpoint: unix:///run/k3s/containerd/containerd\.sock.*image-endpoint: unix:///run/k3s/containerd/containerd\.sock' tasks/configure-crictl.yml
 require 'Existing clusters have a safe crictl configuration playbook' '(?ms)hosts: k3s_cluster.*include_tasks: tasks/configure-crictl\.yml' k3s-configure-crictl.yml

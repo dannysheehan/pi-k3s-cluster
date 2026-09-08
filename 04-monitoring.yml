@@ -225,11 +225,15 @@
               size: "{{ vm_storage_size }}"
             resources:
               requests:
-                cpu: 100m
-                memory: 256Mi
-              limits:
-                cpu: 500m
+                cpu: 250m
                 memory: 512Mi
+              limits:
+                # Failure testing showed both insert workers saturated and
+                # resident memory at the old 512 MiB limit while replaying a
+                # vmagent queue after a storage-node reboot. Give recovery
+                # enough headroom without allowing one TSDB to consume a Pi.
+                cpu: "1"
+                memory: 1Gi
             # Optimisations for Raspberry Pi
             extraArgs:
               dedup.minScrapeInterval: 30s

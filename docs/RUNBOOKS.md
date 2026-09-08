@@ -62,9 +62,27 @@ a maintenance window. Stop K3s on the affected server and follow the K3s
 version-matched restore procedure using snapshots under
 `/var/lib/rancher/k3s/server/db/snapshots`.
 
+## Failure testing
+
+Use physical node reboot or power loss to validate API-VIP failover. Stopping
+the K3s systemd service alone is not equivalent: containerd can leave the
+kube-vip static pod running, allowing it to retain the VIP while the node-local
+API listener is down. This blackholes `192.168.1.40:6443` even though the other
+API servers and etcd quorum remain healthy.
+
+For a storage-node test, use a disposable two-replica PVC mounted on a
+different eligible node. Write a timestamp every few seconds before and during
+the reboot. Accept the test only after reads and writes survive the degraded
+period, the node is Ready, all volumes return to `healthy`, vmagent reports no
+dropped packets, its persistent queue drains, and `./scripts/verify-cluster.sh`
+passes. Longhorn intentionally allows one replica rebuild per node at a time,
+so application volumes may recover serially. The most recent evidence is in
+`docs/FAILURE-TESTS.md`.
+
 ## Post-baseline work
 
 Synology DS923+ NFS CSI is deferred. Introduce it only after baseline
 verification as a non-default RWX StorageClass beside Longhorn, once endpoint,
-export, and credentials are decided. Maintain an off-cluster canonical Git
-remote; its location is TBD.
+export, and credentials are decided. The canonical Git remote is the Synology
+Forgejo `dsheehan/home-gitops` repository; maintain an independent off-NAS
+mirror.

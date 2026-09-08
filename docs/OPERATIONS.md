@@ -54,9 +54,27 @@ ClusterIP fronting VictoriaMetrics. For empty dashboards, trace exporter →
 vmagent → `vmsingle-stable` → Grafana; for logs trace Fluent Bit →
 VictoriaLogs (its message field is `_msg`) → Grafana datasource.
 
+After a monitoring storage-node restart, vmagent's persistent remote-write
+queue can take several minutes to drain while Longhorn serializes replica
+rebuilds. Check the live pod's self-metrics rather than relying only on an
+instant VictoriaMetrics query:
+
+```bash
+pod=$(kubectl -n monitoring get pod \
+  -l app.kubernetes.io/name=victoria-metrics-agent \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n monitoring exec "$pod" -- wget -qO- \
+  http://127.0.0.1:8429/metrics | \
+  grep -E '^vmagent_remotewrite_(pending_data_bytes|packets_dropped_total)'
+```
+
+Do not begin another disruptive storage test until every Longhorn volume is
+healthy and the queue has drained without dropped packets. See
+`docs/FAILURE-TESTS.md` for the validated recovery behaviour.
+
 ## Deferred storage and Git
 
 Synology DS923+ NFS CSI is not part of the baseline. Post-baseline it will be
 a non-default RWX StorageClass alongside the default Longhorn class; its inputs
-are TBD. The canonical Git remote is required to be off-cluster and remains
-TBD.
+are TBD. The canonical Git remote is the off-cluster Synology Forgejo repository
+`dsheehan/home-gitops`; keep an independent off-NAS mirror for recovery.

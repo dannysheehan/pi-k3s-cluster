@@ -13,6 +13,7 @@ five-second intervals.
 | Reboot `pi-ctl-01` | Pass | kube-vip moved to `pi-ctl-03`; API interruption was approximately 5-10 seconds. The node and all node-local pods rejoined. |
 | Reboot `pi-ctl-02` | Pass | `pi-ctl-03` already held the VIP, so the API remained available. Grafana rescheduled to `pi-wrk-02`; its Longhorn RWO volume reattached after the expected brief multi-attach transition. |
 | Reboot `pi-ctl-03` | Pass | kube-vip moved to `pi-ctl-01`; API interruption was approximately 10-15 seconds. The VictoriaMetrics volume and both replicas recovered. vmagent buffered about 52 MB while VictoriaMetrics was unavailable, dropped no packets, and later drained to zero. |
+| Reboot current API and L2 lease holder `pi-ctl-01` | Pass | From a real LAN client, the API VIP moved to `pi-ctl-02` and the Cilium L2 lease for `192.168.1.200` moved to `pi-wrk-01`. The Homepage request through Traefik returned HTTP 200 again after approximately 15 seconds and remained available. `pi-ctl-01` returned Ready after approximately 4.5 minutes. |
 | Move disposable Longhorn PVC | Pass | A 1 GiB, two-replica `longhorn-rpi` PVC was written on `pi-wrk-01`, detached, mounted on `pi-wrk-02`, read successfully, and written again. Replicas were on distinct eligible storage nodes. |
 | Reboot storage node `pi-wrk-01` | Pass | The disposable PVC was attached to `pi-wrk-02` with replicas on `pi-ctl-03` and `pi-wrk-01`. While `pi-wrk-01` was unavailable, the volume remained attached and writable in `degraded` state. The probe produced 351 timestamp samples across the degraded and recovery intervals with no observed write failure. The node returned Ready about 5.5 minutes after the reboot request. Longhorn serialized replica rebuilds and all volumes were healthy about 13.7 minutes after the request. |
 
@@ -56,7 +57,6 @@ queue depth of zero.
 
 ## Remaining acceptance work
 
-- Exercise the Traefik `192.168.1.200` failover from a real LAN client.
 - Run the complete warning, critical, Watchdog, dead-man, ntfy, and external
   heartbeat alert test set during a controlled failure.
 - Complete the seven-day soak and review restarts, warnings, SMART health, etcd

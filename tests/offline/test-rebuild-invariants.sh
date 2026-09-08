@@ -77,6 +77,7 @@ require 'Flux bootstrap waits for source readiness' 'name: Wait for canonical Gi
 require 'Flux exposes a source-only preflight tag' 'tags: \[flux, gitops, preflight\]' 06-flux.yml
 require 'Live verification checks canonical Flux source' 'Flux Git source is Ready from the canonical NAS repository' scripts/verify-cluster.sh
 require 'Live verification checks 1Password retrieval canary' '1Password retrieval canary is Ready with the expected target key' scripts/verify-cluster.sh
+require 'Live verification checks Traefik from the LAN client path' '(?ms)TRAEFIK_LB_IP="192\.168\.1\.200".*HOMEPAGE_HOST="homepage\.local".*check_lan_ingress' scripts/verify-cluster.sh
 
 if (( failures )); then
   printf '\nOffline rebuild invariant checks failed: %d.\n' "$failures" >&2

@@ -6,6 +6,8 @@ set -euo pipefail
 
 KUBECONFIG_PATH="${KUBECONFIG:-$HOME/.kube/config-rpi}"
 API_VIP="192.168.1.40"
+TRAEFIK_LB_IP="192.168.1.200"
+HOMEPAGE_HOST="homepage.local"
 EXPECTED_NODES=(pi-ctl-01 pi-ctl-02 pi-ctl-03 pi-wrk-01 pi-wrk-02)
 EXPECTED_STORAGE_NODES=(pi-ctl-03 pi-wrk-01 pi-wrk-02)
 
@@ -16,6 +18,11 @@ fi
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required but not installed." >&2
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required but not installed." >&2
   exit 1
 fi
 
@@ -176,6 +183,21 @@ check_network_invariants() {
   fi
 }
 
+check_lan_ingress() {
+  local status
+  if ! status="$(curl -sS --connect-timeout 3 --max-time 8 \
+    -H "Host: ${HOMEPAGE_HOST}" -o /dev/null -w '%{http_code}' \
+    "http://${TRAEFIK_LB_IP}/")"; then
+    record_failure "Cannot reach Homepage through Traefik at ${TRAEFIK_LB_IP} from this client."
+    return
+  fi
+  if [[ "$status" == 200 ]]; then
+    record_ok "Homepage is reachable through Traefik at ${TRAEFIK_LB_IP} from this LAN client."
+  else
+    record_failure "Homepage through Traefik at ${TRAEFIK_LB_IP} returned HTTP ${status}; expected 200."
+  fi
+}
+
 check_filesystem_device_errors() {
   local response
   if ! response="$(kubectl_rpi exec -n monitoring deploy/vmagent-victoria-metrics-agent -- \
@@ -324,6 +346,7 @@ run_section "Monitoring Daemon Coverage" check_daemonset_coverage fluent-bit mon
 run_section "VictoriaMetrics Endpoint Health" check_vmsingle_endpoints
 run_section "Longhorn Storage Eligibility" check_longhorn_storage
 run_section "CNI, Ingress, And Gateway Invariants" check_network_invariants
+run_section "LAN Ingress" check_lan_ingress
 run_section "Filesystem Device Errors" check_filesystem_device_errors
 run_section "Raspberry Pi And Root SSD Health" check_pi_health_metrics
 run_section "VMAgent Queue Health" check_vmagent_queue

@@ -55,10 +55,22 @@ With vmalert briefly paused, the post-rollout queue drained from approximately
 restored to one replica and the complete cluster verifier passed with a live
 queue depth of zero.
 
+## Alert-path test
+
+Temporary `PhaseGWarningTest` and `PhaseGCriticalTest` alerts were submitted to
+Alertmanager. The operator confirmed both firing notifications in ntfy; the
+warning used default priority and the critical alert used urgent priority.
+Both resolved notifications were subsequently observed and no temporary alert
+remained active.
+
+The always-firing Watchdog was active and routed to the `healthchecks`
+receiver. Alertmanager had completed 285 webhook notifications with zero
+webhook failures. The external cluster heartbeat accepted an explicit failure
+ping and recovery ping with HTTP 200, then a disposable Job created from the
+`cluster-heartbeat` CronJob completed successfully and was removed.
+
 ## Remaining acceptance work
 
-- Run the complete warning, critical, Watchdog, dead-man, ntfy, and external
-  heartbeat alert test set during a controlled failure.
 - Complete the seven-day soak and review restarts, warnings, SMART health, etcd
   latency, Cilium drops, USB errors, storage latency, and replica rebuilds.
 - Keep an off-NAS mirror of the canonical Synology Forgejo repository and test

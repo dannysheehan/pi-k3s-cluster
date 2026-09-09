@@ -78,6 +78,13 @@ require 'Flux exposes a source-only preflight tag' 'tags: \[flux, gitops, prefli
 require 'Live verification checks canonical Flux source' 'Flux Git source is Ready from the canonical NAS repository' scripts/verify-cluster.sh
 require 'Live verification checks 1Password retrieval canary' '1Password retrieval canary is Ready with the expected target key' scripts/verify-cluster.sh
 require 'Live verification checks Traefik from the LAN client path' '(?ms)TRAEFIK_LB_IP="192\.168\.1\.200".*HOMEPAGE_HOST="homepage\.local".*check_lan_ingress' scripts/verify-cluster.sh
+# The following source-invariant regexes intentionally match literal shell
+# variable references rather than expanding variables in this test process.
+# shellcheck disable=SC2016
+require 'Alert smoke test requires explicit live mode' '(?ms)LIVE_TEST=false.*--live\) LIVE_TEST=true.*if \[\[ "\$LIVE_TEST" != true \]\]' scripts/test-alerting.sh
+# shellcheck disable=SC2016
+require 'Alert smoke test restores external heartbeat on exit' '(?ms)cleanup\(\).*heartbeat_failed.*curl .*"\$heartbeat_url".*trap cleanup EXIT INT TERM' scripts/test-alerting.sh
+forbid 'Alert smoke test does not print external endpoint secrets' 'echo .*heartbeat_url|printf .*heartbeat_url|echo .*ntfy_base|printf .*ntfy_base' scripts/test-alerting.sh
 
 if (( failures )); then
   printf '\nOffline rebuild invariant checks failed: %d.\n' "$failures" >&2

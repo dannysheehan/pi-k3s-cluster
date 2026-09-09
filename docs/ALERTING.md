@@ -23,3 +23,28 @@ kubectl get pods -n monitoring
 The healthchecks heartbeat detects broad cluster loss. The Alertmanager
 watchdog detects failure in the alerting pipeline. Investigate vmalert,
 Alertmanager, and ntfy delivery in that order.
+
+## Smoke testing
+
+The default smoke test is read-only. It verifies Alertmanager configuration,
+webhook counters, the always-firing Watchdog, and the latest scheduled cluster
+heartbeat:
+
+```bash
+./scripts/test-alerting.sh
+```
+
+The live mode sends clearly named temporary warning and critical notifications
+to the configured ntfy topic, resolves them, signals a controlled external
+heartbeat failure and recovery, and runs a disposable heartbeat Job from
+inside the cluster:
+
+```bash
+./scripts/test-alerting.sh --live
+```
+
+Live mode intentionally produces external notifications. It extracts the
+vaulted endpoints only from live workload configuration, never prints them,
+and uses an exit trap to resolve alerts and restore the heartbeat after a
+failure. Confirm the expected ntfy and healthchecks.io notifications with the
+operator. Do not run live mode during an unrelated incident.

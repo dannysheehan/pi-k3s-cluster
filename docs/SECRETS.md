@@ -100,3 +100,29 @@ is not Ready, check controller events, outbound DNS/HTTPS access to 1Password,
 the vault identifier, service-account scope, and whether the token was revoked.
 If 1Password is temporarily unavailable, existing Kubernetes Secrets remain;
 new values and rotations do not reconcile until access returns.
+
+### Stuck SDK client (`wasm error: out of bounds memory access`)
+
+The SDK provider runs 1Password's core as a WASM module inside the controller.
+After a transient network error such as a DNS failure, that instance can be
+left unusable while the ClusterSecretStore still reports Valid. Every
+ExternalSecret then fails with `wasm error: out of bounds memory access` until
+the controller process restarts. Upstream tracks this as
+[external-secrets#6941](https://github.com/external-secrets/external-secrets/issues/6941)
+and [onepassword-sdk-go#288](https://github.com/1Password/onepassword-sdk-go/issues/288);
+no fix was available at the time of writing.
+
+Recover with a controller restart, then force a refresh:
+
+```bash
+kubectl -n external-secrets rollout restart deploy/external-secrets
+kubectl -n external-secrets annotate externalsecret onepassword-canary \
+  force-sync="$(date +%s)" --overwrite
+```
+
+Starting a new SDK client is CPU- and memory-heavy on the Pis. With the old
+`200m`/`256Mi` limits the restarted controllers stayed pinned at their CPU
+limit and never finished (the canary sat in `SecretSyncedError` for over ten
+minutes), so `05-secrets.yml` now allows `1` CPU and `512Mi`. A healthy
+controller idles at about 3m CPU and 300-340Mi; treat sustained growth toward
+the limit as a sign of the stuck-client state.

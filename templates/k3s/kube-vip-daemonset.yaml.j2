@@ -55,6 +55,14 @@ spec:
                 - NET_ADMIN
                 - NET_RAW
           env:
+            # Leader election must work before Cilium restores ClusterIP routing
+            # after a full power loss. Each control-plane host has its own API.
+            - name: KUBERNETES_SERVICE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
             - name: vip_arp
               value: "true"
             - name: vip_interface

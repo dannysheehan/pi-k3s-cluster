@@ -132,7 +132,7 @@ check_vmsingle_endpoints() {
 }
 
 check_longhorn_storage() {
-  local nodes eligible names sc_replicas sc_selector
+  local nodes eligible names sc_replicas sc_selector volumes unhealthy
   nodes="$(json_items get nodes.longhorn.io -n longhorn-system)"
   eligible="$(printf '%s' "$nodes" | jq '[.items[] | select((.spec.allowScheduling // false) == true and ((.spec.tags // []) | index("storage-network")) != null)] | length')"
   names="$(printf '%s' "$nodes" | jq -r '.items[] | select((.spec.allowScheduling // false) == true and ((.spec.tags // []) | index("storage-network")) != null) | .metadata.name' | sort | tr '\n' ' ')"
@@ -147,6 +147,15 @@ check_longhorn_storage() {
     record_ok "StorageClass longhorn-rpi uses two replicas on storage-network nodes."
   else
     record_failure "StorageClass longhorn-rpi has replicas='${sc_replicas:-missing}', nodeSelector='${sc_selector:-missing}'; expected 2 and storage-network."
+  fi
+  volumes="$(json_items get volumes.longhorn.io -n longhorn-system)"
+  unhealthy="$(printf '%s' "$volumes" | jq -r '.items[] | select(.status.robustness != "healthy") | "\(.metadata.name): \(.status.state)/\(.status.robustness)"')"
+  if [[ -n "$unhealthy" ]]; then
+    record_failure "Longhorn volumes have not recovered: ${unhealthy//$'\n'/, }."
+  elif [[ "$(printf '%s' "$volumes" | jq '.items | length')" -eq 0 ]]; then
+    record_failure "No Longhorn volumes found for the storage-backed baseline."
+  else
+    record_ok "All Longhorn volumes report healthy replicas."
   fi
 }
 
@@ -167,6 +176,7 @@ check_network_invariants() {
   else
     record_failure "Cilium cni-exclusive is '${cilium_exclusive:-missing}', expected false."
   fi
+  check_daemonset_coverage cilium kube-system
   check_daemonset_coverage kube-multus-ds kube-system
   check_daemonset_coverage whereabouts kube-system
   traefik_ready="$(kubectl_rpi -n traefik get deployment traefik -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"

@@ -16,6 +16,41 @@ the affected host's `k3s` service (or `k3s-agent` on agents). K3s data is under
 `/var/lib/rancher/k3s`. Do not repair a live cluster by rerunning the bootstrap
 playbook.
 
+### Full power loss: API VIP missing, nodes reachable
+
+If direct access to `https://192.168.1.41:6443` works but the VIP does not,
+inspect kube-vip logs using the direct endpoint:
+
+```bash
+kubectl --server=https://192.168.1.41:6443 get --raw='/readyz?verbose'
+kubectl --server=https://192.168.1.41:6443 -n kube-system logs \
+  -l app.kubernetes.io/name=kube-vip --tail=20 --prefix
+```
+
+Lease requests timing out against `10.43.0.1:443`, together with Cilium
+waiting for `192.168.1.40:6443`, indicate a startup dependency loop.
+kube-vip must contact its own control-plane node directly for leader election:
+the template sets `KUBERNETES_SERVICE_HOST` from `status.hostIP` and
+`KUBERNETES_SERVICE_PORT` to `6443`. This works before Cilium restores
+ClusterIP routing.
+
+For an existing cluster, update only the managed kube-vip manifest on the
+bootstrap server; K3s applies it automatically. Do not rerun bootstrap:
+
+```bash
+uv run ansible pi-ctl-01 -m ansible.builtin.template \
+  -a 'src=templates/k3s/kube-vip-daemonset.yaml.j2 dest=/var/lib/rancher/k3s/server/manifests/kube-vip-daemonset.yaml owner=root group=root mode=0600'
+kubectl --server=https://192.168.1.41:6443 -n kube-system rollout status \
+  daemonset/kube-vip --timeout=120s
+kubectl get --raw=/readyz
+kubectl -n kube-system rollout status daemonset/cilium --timeout=600s
+./scripts/verify-cluster.sh
+```
+
+Cilium may need several minutes to retry after its startup backoff. Verify
+Longhorn volumes and application readiness after networking returns; node
+`Ready` status alone does not establish workload recovery.
+
 ## USB SSD dropouts
 
 Ping OK with SSH hanging is the USB-SSD dropout signature: the cheap
